@@ -8,7 +8,6 @@ from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # -------------------------
 # Configuration
@@ -476,6 +475,7 @@ def trigger_reminders():
         # Loop through 1, 2, and 3 days from now
         for days_left in [1, 2, 3]:
             target_date = today + timedelta(days=days_left)
+            print(target_date)
             
             # Format "time string" for the message
             # e.g. "Tomorrow" or "in 3 days"
@@ -484,13 +484,13 @@ def trigger_reminders():
             # 1. Check REGISTRATION DEADLINES
             deadline_events = Event.query.filter_by(registration_deadline=target_date).all()
             for event in deadline_events:
-                msg = f"⚠️ *{event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
+                msg = f"⚠️ *{event.event_type} {event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
                 total_sent += notify_subscribers(event, msg)
 
             # 2. Check ACTUAL EVENT DATES
             test_day_events = Event.query.filter_by(event_date=target_date).all()
             for event in test_day_events:
-                msg = f"📅 *이벤트 알림:* *{event.title}*이 *{time_str}* 입니다 ({event.event_date})!"
+                msg = f"📅 *이벤트 알림:* *{event.event_type}* *{event.title}*이 *{time_str}* 입니다 ({event.event_date})!"
                 total_sent += notify_subscribers(event, msg)
 
         return {"status": "success", "reminders_sent": total_sent}, 200

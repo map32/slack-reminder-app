@@ -1,1 +1,5 @@
 slack-bolt
+gunicorn
+python-dotenv
+flask
+flask-sqlalchemy
