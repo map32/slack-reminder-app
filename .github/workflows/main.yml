@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Send POST Request with Auth
         run: |
-          curl -X POST ${{ secrets.APP_URL }}/api/reminders \
+          curl -X POST ${{ secrets.APP_URL }}/api/run-reminders \
           -H "Content-Type: application/json" \
           -H "Authorization: Bearer ${{ secrets.REMINDER_TOKEN }}" \
           --fail
