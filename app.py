@@ -350,11 +350,10 @@ def handle_list_subs(ack, respond, command):
     target_id = parse_user_id(text) if text else user_id
     
     # Check permission
-    if target_id != user_id and not is_user_admin(user_id):
-        respond("🚫 다른 유저의 구독 리스트는 관리자만 볼 수 있습니다.")
-        return
-
     with flask_app.app_context():
+        if target_id != user_id and not is_user_admin(user_id):
+            respond("🚫 다른 유저의 구독 리스트는 관리자만 볼 수 있습니다.")
+            return
         subs = Subscription.query.filter_by(user_slack_id=target_id).all()
         if not subs:
             respond(f"<@{target_id}> 님은 구독 중인 이벤트가 없습니다.")
@@ -371,13 +370,12 @@ def handle_list_subs(ack, respond, command):
 def open_admin_sub_modal(ack, body, client, command):
     ack()
     user_id = command["user_id"]
-    
-    if not is_user_admin(user_id):
-        client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
-        return
-
     # 1. Fetch upcoming events for the dropdown
     with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+        
         # Slack Dropdowns have a limit of 100 items. 
         # We fetch the next 100 future events.
         events = Event.query.filter(Event.registration_deadline >= datetime.now().date())\
