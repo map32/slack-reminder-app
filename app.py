@@ -312,6 +312,63 @@ def open_edit_event_modal(client, trigger_id, event_id):
 # 4. Bolt Handlers
 # -------------------------
 
+# At the top of your file, make sure you know your App ID
+# You can hardcode it, or get it from env vars.
+APP_ID = os.getenv("SLACK_APP_ID", "A0A6X1SAT1B") # Find this in "Basic Information"
+
+@bolt_app.event("team_join")
+def welcome_new_user(event, client, logger):
+    """
+    Triggered when a new user joins the workspace.
+    Sends a welcome DM with a Deep Link to the App Home.
+    """
+    try:
+        user_id = event["user"]["id"]
+        team_id = event["user"]["team_id"]
+        
+        # Construct the Deep Link
+        # This forces Slack to open YOUR App's Home Tab
+        app_home_link = f"slack://app?team={team_id}&id={APP_ID}&tab=home"
+        
+        # Send the DM
+        client.chat_postMessage(
+            channel=user_id,
+            text="Welcome! Click the button to see upcoming events.", # Fallback text
+            blocks=[
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "👋 환영합니다!"}
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "헤스티아 알리미 앱에 오신 것을 환영합니다.\n"
+                            "아래 버튼을 눌러 *홈 탭*으로 이동하면,\n"
+                            "시험 및 행사 일정을 확인하고 구독할 수 있습니다."
+                        )
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "🚀 앱 홈으로 이동"},
+                            "style": "primary",
+                            "url": app_home_link, # <--- The Deep Link goes here
+                            "action_id": "link_to_home" 
+                        }
+                    ]
+                }
+            ]
+        )
+        logger.info(f"Sent onboarding DM to {user_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to onboard user: {e}")
+
 # --- Navigation & Home ---
 @bolt_app.event("app_home_opened")
 def update_home_tab(client, event, logger):
