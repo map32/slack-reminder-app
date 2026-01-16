@@ -391,11 +391,13 @@ def open_admin_sub_modal(ack, body, client, command):
             # Slack limit is 75. Date part takes ~12 chars (" (2024-01-01)").
             # So we have roughly 60 chars safe for the title.
             safe_title = e.title
-            if len(safe_title) > 60:
-                safe_title = safe_title[:57] + "..."  # Truncate and add ellipsis
+            safe_cat = e.event_type
+            occupied_len = len(safe_cat) + len(date_str) + 2
+            if len(safe_title) > occupied_len - 6:
+                safe_title = safe_title[:occupied_len - 6] + "..."  # Truncate and add ellipsis
 
             # 2. Create the label using the safe title
-            label_text = f"{safe_title} ({date_str})"
+            label_text = f"{safe_cat} {safe_title} ({date_str})"
             
             event_options.append({
                 "text": {"type": "plain_text", "text": label_text},
