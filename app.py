@@ -52,6 +52,7 @@ class EventType(db.Model):
     name = db.Column(db.String(50), primary_key=True)
 
 class AppAdmin(db.Model):
+    __tablename__ = 'app_admin'
     """List of additional admin user IDs"""
     user_slack_id = db.Column(db.String(50), primary_key=True)
 
@@ -116,7 +117,7 @@ def build_event_block(event, is_subscribed, is_admin=False):
 
     # --- ADMIN VIEW (Overflow Menu) ---
     if is_admin:
-        sub_text = "🔕 구독 취소" if is_subscribed else "🔔 알림 구독"
+        sub_text = "구독 취소" if is_subscribed else "알림 구독"
         sub_action = "unsub" if is_subscribed else "sub"
         
         accessory = {
@@ -128,11 +129,11 @@ def build_event_block(event, is_subscribed, is_admin=False):
                     "value": f"{sub_action}|{event.id}" 
                 },
                 {
-                    "text": {"type": "plain_text", "text": "✏️ Edit"},
+                    "text": {"type": "plain_text", "text": "Edit"},
                     "value": f"edit|{event.id}"
                 },
                 {
-                    "text": {"type": "plain_text", "text": "🗑️ Delete"},
+                    "text": {"type": "plain_text", "text": "Delete"},
                     "value": f"delete|{event.id}"
                 }
             ]
