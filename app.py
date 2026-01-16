@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 import math
 import secrets
 from datetime import datetime, timedelta
@@ -103,6 +104,12 @@ def get_sorted_events(user_id, category=None):
     # So Subscribed (False) comes first.
     events.sort(key=lambda x: (x.id not in subs, x.event_date))
     return events, subs
+
+def parse_user_id(text):
+    """Extracts U12345 from text like '<@U12345|name>'"""
+    import re
+    match = re.search(r"<@(U[A-Z0-9]+)(\|.*?)?>", text)
+    return match.group(1) if match else None
 
 def build_event_block(event, is_subscribed, is_admin=False):
     """Creates a single event row block with Admin Overflow or User Button."""
@@ -316,6 +323,154 @@ def open_edit_event_modal(client, trigger_id, event_id):
 # You can hardcode it, or get it from env vars.
 APP_ID = os.getenv("SLACK_APP_ID", "A0A6X1SAT1B") # Find this in "Basic Information"
 
+# -------------------------
+# 5. Bolt Handlers (Interactivity)
+# -------------------------
+
+@bolt_app.command("/list-events")
+def handle_list_events(ack, respond):
+    ack()
+    with flask_app.app_context():
+        events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).order_by(Event.event_date).all()
+        if not events:
+            respond("📅 예정된 이벤트가 없습니다.")
+            return
+        
+        response = "*📅 다가오는 이벤트 목록:*\n"
+        for e in events:
+            response += f"• [ID: {e.id}] *{e.title}* ({e.event_type}) - {e.event_date} 데드라인: {e.registration_deadline}\n"
+        respond(response)
+
+@bolt_app.command("/list-subs")
+def handle_list_subs(ack, respond, command):
+    ack()
+    user_id = command["user_id"]
+    text = command["text"].strip()
+    
+    target_id = parse_user_id(text) if text else user_id
+    
+    # Check permission
+    if target_id != user_id and not is_user_admin(user_id):
+        respond("🚫 다른 유저의 구독 리스트는 관리자만 볼 수 있습니다.")
+        return
+
+    with flask_app.app_context():
+        subs = Subscription.query.filter_by(user_slack_id=target_id).all()
+        if not subs:
+            respond(f"<@{target_id}> 님은 구독 중인 이벤트가 없습니다.")
+            return
+        
+        response = f"*📋 <@{target_id}> 님의 구독 리스트:*\n"
+        for sub in subs:
+            event = Event.query.get(sub.event_id)
+            if event and event.registration_deadline >= datetime.now().date():
+                response += f"• {event.title} - {event.event_date} ({event.registration_deadline})\n"
+        respond(response)
+
+@bolt_app.command("/admin-sub")
+def open_admin_sub_modal(ack, body, client, command):
+    ack()
+    user_id = command["user_id"]
+    
+    if not is_user_admin(user_id):
+        client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+        return
+
+    # 1. Fetch upcoming events for the dropdown
+    with flask_app.app_context():
+        # Slack Dropdowns have a limit of 100 items. 
+        # We fetch the next 100 future events.
+        events = Event.query.filter(Event.registration_deadline >= datetime.now().date())\
+                            .order_by(Event.event_date)\
+                            .limit(100).all()
+        
+        # Format for Slack Option Object
+        event_options = []
+        for e in events:
+            # Dropdown text: "SAT Math (2024-05-01)"
+            date_str = e.event_date.strftime('%Y-%m-%d')
+            deadline = e.registration_deadline.strftime('%Y-%m-%d')
+            event_options.append({
+                "text": {"type": "plain_text", "text": f"{e.title} ({date_str})"},
+                "value": str(e.id) # The ID is hidden in the value
+            })
+
+    # 2. Open the Modal
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_sub",
+            "title": {"type": "plain_text", "text": "구독"},
+            "submit": {"type": "plain_text", "text": "유저 구독하기"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                },
+                # Input 1: User Picker
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "element": {
+                        "type": "users_select",
+                        "action_id": "user_select",
+                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"}
+                    }
+                },
+                # Input 2: Action Type (Single Event or Category?)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "모드"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "전체"}, "value": "all"}
+                        ]
+                    }
+                },
+                # Input 3: Event Picker (Searchable Dropdown)
+                # Note: This is optional because "All" doesn't need it.
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True, 
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "event_id",
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "options": event_options if event_options else [{"text": {"type": "plain_text", "text": "이벤트 없음"}, "value": "none"}]
+                    }
+                },
+                # Input 4: Category Picker (Only needed if Mode is Category)
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
+# Helper for category options
+def get_category_options():
+    with flask_app.app_context():
+        cats = EventType.query.all()
+        return [{"text": {"type": "plain_text", "text": c.name}, "value": c.name} for c in cats]
+
 @bolt_app.event("team_join")
 def welcome_new_user(event, client, logger):
     """
@@ -507,6 +662,71 @@ def handle_admin_sub(ack, body, view, client):
             db.session.add(AppAdmin(user_slack_id=uid))
             db.session.commit()
         client.views_publish(user_id=body["user"]["id"], view={"type": "home", "blocks": get_dashboard_view(body["user"]["id"])})
+
+@bolt_app.view("submit_admin_sub")
+def handle_admin_sub_submission(ack, body, view, client):
+    ack()
+    
+    # 1. Extract Data
+    values = view["state"]["values"]
+    target_user = values["target_user"]["user_select"]["selected_user"]
+    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
+    
+    # Context info
+    admin_id = body["user"]["id"]
+    msg = ""
+
+    with flask_app.app_context():
+        
+        # --- MODE 1: SINGLE ITEM ---
+        if mode == "item":
+            selected_option = values["event_select"]["event_id"]["selected_option"]
+            if not selected_option or selected_option["value"] == "none":
+                # Send error message to Admin
+                client.chat_postMessage(channel=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                return
+
+            event_id = int(selected_option["value"])
+            event = Event.query.get(event_id)
+            
+            # Subscribe
+            if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event_id).first():
+                db.session.add(Subscription(user_slack_id=target_user, event_id=event_id))
+                msg = f"✅ <@{target_user}> 님을 *{event.title}*에 구독시켰습니다."
+            else:
+                msg = f"ℹ️ <@{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
+
+        # --- MODE 2: CATEGORY ---
+        elif mode == "cat":
+            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+            if not selected_cat:
+                client.chat_postMessage(channel=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                return
+            
+            cat_name = selected_cat["value"]
+            cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
+            
+            count = 0
+            for event in cat_events:
+                if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id))
+                    count += 1
+            msg = f"✅ <@{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
+
+        # --- MODE 3: ALL ---
+        elif mode == "all":
+            all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
+            count = 0
+            for event in all_events:
+                if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id))
+                    count += 1
+            msg = f"✅ <@{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
+
+        db.session.commit()
+    
+    # Notify Admin of success
+    client.chat_postMessage(channel=admin_id, text=msg)
 
 # --- Interactive Actions ---
 
