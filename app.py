@@ -106,6 +106,34 @@ def get_sorted_events(user_id, category=None):
     events.sort(key=lambda x: (x.id not in subs, x.event_date))
     return events, subs
 
+def find_event_by_query(query_text):
+    """
+    Tries to find a single event based on ID (int) or Title (string).
+    Returns (Event, ErrorMessage).
+    """
+    if not query_text:
+        return None, "⚠️ 검색어를 입력해주세요. (예: `/check-pending SAT`)"
+    
+    # 1. Try search by ID
+    if query_text.isdigit():
+        event = Event.query.get(int(query_text))
+        if event: return event, None
+    
+    # 2. Try search by Title (Partial Match)
+    # ilike makes it case-insensitive
+    events = Event.query.filter(Event.title.ilike(f"%{query_text}%")).all()
+    
+    if len(events) == 0:
+        return None, f"⚠️ '{query_text}'에 해당하는 이벤트를 찾을 수 없습니다."
+    elif len(events) > 1:
+        # If multiple matches, ask for ID
+        msg = "⚠️ 여러 이벤트가 검색되었습니다. 정확한 ID를 입력해주세요:\n"
+        for e in events:
+            msg += f"• [ID: {e.id}] {e.title} ({e.event_date})\n"
+        return None, msg
+        
+    return events[0], None
+
 def parse_user_id(text):
     """Extracts U12345 from text like '<@U12345|name>'"""
     import re
@@ -387,9 +415,101 @@ def handle_list_subs(ack, respond, command):
         response = f"*📋 <@{target_id}> 님의 구독 리스트:*\n"
         for sub in subs:
             event = Event.query.get(sub.event_id)
+            status = "미등록" if event.status == 'Pending' else '등록완료'
             if event and event.registration_deadline >= datetime.now().date():
-                response += f"• {event.title} - {event.event_date} ({event.registration_deadline})\n"
+                response += f"• {event.title} - {event.event_date} 데드라인: {event.registration_deadline} *{status}*\n"
         respond(response)
+
+@bolt_app.command("/check-pending")
+def handle_check_pending(ack, respond, command):
+    ack()
+    user_id = command["user_id"]
+    query_text = command["text"].strip()
+
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            respond("🚫 관리자 권한이 없습니다.")
+            return
+
+        # Find the event
+        event, err = find_event_by_query(query_text)
+        if err:
+            respond(err)
+            return
+
+        # Find Pending Subscriptions
+        pending_subs = Subscription.query.filter_by(event_id=event.id, status="Pending").all()
+        registered_count = Subscription.query.filter_by(event_id=event.id, status="Registered").count()
+        
+        if not pending_subs:
+            respond(f"🎉 *{event.title}*: 모든 학생이 등록을 완료했습니다! ({registered_count}명 완료)")
+            return
+
+        # Build List
+        msg = f"🚨 *{event.title}* 미등록 학생 리스트 ({len(pending_subs)}명):\n"
+        for sub in pending_subs:
+            msg += f"• <@{sub.user_slack_id}>\n"
+        
+        msg += f"\n✅ 등록 완료: {registered_count}명"
+        msg += f"\n👉 `/nudge-pending {event.id}` 를 입력하여 알림을 보낼 수 있습니다."
+        
+        respond(msg)
+
+@bolt_app.command("/nudge-pending")
+def handle_nudge_pending(ack, respond, client, command):
+    ack()
+    user_id = command["user_id"]
+    query_text = command["text"].strip()
+
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            respond("🚫 관리자 권한이 없습니다.")
+            return
+
+        # Find the event
+        event, err = find_event_by_query(query_text)
+        if err:
+            respond(err)
+            return
+
+        # Find Pending Subscriptions
+        pending_subs = Subscription.query.filter_by(event_id=event.id, status="Pending").all()
+        
+        if not pending_subs:
+            respond(f"✅ *{event.title}*: 알림을 보낼 대상이 없습니다 (모두 등록 완료).")
+            return
+
+        count = 0
+        for sub in pending_subs:
+            try:
+                # Send the Nudge DM
+                client.chat_postMessage(
+                    channel=sub.user_slack_id,
+                    text=f"👋 안녕하세요! 담당 컨설턴트가 *{event.title}* 등록 여부를 확인 중입니다.",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"👋 안녕하세요! \n*{event.title}* 등록을 아직 완료하지 않으신 것 같습니다.\n확인 부탁드립니다!"}
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "✅ 등록 완료"},
+                                    "style": "primary",
+                                    "value": str(event.id),
+                                    "action_id": "confirm_registration"
+                                }
+                            ]
+                        }
+                    ]
+                )
+                count += 1
+            except Exception as e:
+                logger.error(f"Failed to nudge {sub.user_slack_id}: {e}")
+
+        respond(f"📨 *{event.title}*: 미등록 학생 *{count}명*에게 알림을 발송했습니다.")
 
 @bolt_app.command("/admin-sub")
 def open_admin_sub_modal(ack, body, client, command):
