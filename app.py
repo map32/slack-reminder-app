@@ -22,10 +22,6 @@ print(DATABASE_URL)
 flask_app = Flask(__name__)
 flask_app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 flask_app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-flask_app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "pool_pre_ping": True,  # Checks if the line is dead before trying to speak
-    "pool_recycle": 300,    # Hangs up and redials every 5 minutes automatically
-}
 
 db = SQLAlchemy(flask_app)
 bolt_app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
