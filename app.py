@@ -385,12 +385,21 @@ def open_admin_sub_modal(ack, body, client, command):
         # Format for Slack Option Object
         event_options = []
         for e in events:
-            # Dropdown text: "SAT Math (2024-05-01)"
             date_str = e.event_date.strftime('%Y-%m-%d')
-            deadline = e.registration_deadline.strftime('%Y-%m-%d')
+            
+            # 1. Calculate how much space we have left for the title
+            # Slack limit is 75. Date part takes ~12 chars (" (2024-01-01)").
+            # So we have roughly 60 chars safe for the title.
+            safe_title = e.title
+            if len(safe_title) > 60:
+                safe_title = safe_title[:57] + "..."  # Truncate and add ellipsis
+
+            # 2. Create the label using the safe title
+            label_text = f"{safe_title} ({date_str})"
+            
             event_options.append({
-                "text": {"type": "plain_text", "text": f"{e.title} ({date_str})"},
-                "value": str(e.id) # The ID is hidden in the value
+                "text": {"type": "plain_text", "text": label_text},
+                "value": str(e.id)
             })
 
     # 2. Open the Modal
