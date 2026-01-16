@@ -68,6 +68,7 @@ class Subscription(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_slack_id = db.Column(db.String(50), nullable=False)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+    status = db.Column(db.String(20), nullable=True)
     __table_args__ = (db.UniqueConstraint('user_slack_id', 'event_id', name='_user_event_uc'),)
 
 # Initialize DB and Seed Data
@@ -112,10 +113,13 @@ def parse_user_id(text):
     return match.group(1) if match else None
 
 def build_event_block(event, is_subscribed, is_admin=False):
-    """Creates a single event row block with Admin Overflow or User Button."""
+    """
+    Creates event blocks. 
+    Returns a LIST of blocks to accommodate the status button.
+    """
     date_str = event.event_date.strftime('%Y-%m-%d')
     deadline_str = event.registration_deadline.strftime('%Y-%m-%d')
-    
+    status = event.status
     # Common Text
     text_section = {
         "type": "mrkdwn", 
@@ -129,20 +133,11 @@ def build_event_block(event, is_subscribed, is_admin=False):
         
         accessory = {
             "type": "overflow",
-            "action_id": "event_actions", # Triggers handle_event_overflow
+            "action_id": "event_actions",
             "options": [
-                {
-                    "text": {"type": "plain_text", "text": sub_text},
-                    "value": f"{sub_action}|{event.id}" 
-                },
-                {
-                    "text": {"type": "plain_text", "text": "Edit"},
-                    "value": f"edit|{event.id}"
-                },
-                {
-                    "text": {"type": "plain_text", "text": "Delete"},
-                    "value": f"delete|{event.id}"
-                }
+                {"text": {"type": "plain_text", "text": sub_text}, "value": f"{sub_action}|{event.id}"},
+                {"text": {"type": "plain_text", "text": "✏️ Edit"}, "value": f"edit|{event.id}"},
+                {"text": {"type": "plain_text", "text": "🗑️ Delete"}, "value": f"delete|{event.id}"}
             ]
         }
 
@@ -155,15 +150,45 @@ def build_event_block(event, is_subscribed, is_admin=False):
             "type": "button",
             "text": {"type": "plain_text", "text": btn_text},
             "value": f"{event.id}|{'unsub' if is_subscribed else 'sub'}",
-            "action_id": "toggle_subscription", # Triggers handle_toggle
+            "action_id": "toggle_subscription",
             "style": btn_style
         }
 
-    return {
+    # 1. Create the Main Block
+    main_block = {
         "type": "section",
         "text": text_section,
         "accessory": accessory
     }
+    
+    blocks = [main_block]
+
+    # 2. Add Status Block (Only if subscribed)
+    if is_subscribed:
+        if status == "Pending":
+            # Show "I Registered" Button
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "등록 확인"},
+                        "value": str(event.id),
+                        "action_id": "confirm_registration",
+                        "style": "primary"
+                    }
+                ]
+            })
+        elif status == "Registered":
+            # Show "Registered" Text
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": "등록 완료"}
+                ]
+            })
+
+    return blocks
 
 def get_dashboard_view(user_id):
     """Constructs the Home Tab Dashboard."""
@@ -393,7 +418,7 @@ def open_admin_sub_modal(ack, body, client, command):
             safe_title = e.title
             safe_cat = e.event_type
             occupied_len = len(safe_cat) + len(date_str) + 2
-            if len(safe_title) > occupied_len - 6:
+            if len(safe_title) > 75 - (occupied_len + 6):
                 safe_title = safe_title[:occupied_len - 6] + "..."  # Truncate and add ellipsis
 
             # 2. Create the label using the safe title
@@ -620,6 +645,40 @@ def open_admin_modal(ack, body, client):
         }
     )
 
+@bolt_app.action("confirm_registration")
+def handle_registration_confirm(ack, body, client):
+    """
+    🆕 HANDLER: Updates status when user clicks "I Have Registered"
+    """
+    ack()
+    user_id = body["user"]["id"]
+    event_id = int(body["actions"][0]["value"])
+    
+    with flask_app.app_context():
+        sub = Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first()
+        if sub:
+            sub.status = "Registered"
+            db.session.commit()
+            
+            # Update the message to remove the button and show success
+            # We fetch the original blocks and replace the action block
+            original_text = body["message"]["text"]
+            client.chat_update(
+                channel=body["channel"]["id"],
+                ts=body["message"]["ts"],
+                text=original_text,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": original_text} # Keep the reminder text
+                    },
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": "✅ *등록 확인 완료 (Confirmed Registration)*"}]
+                    }
+                ]
+            )
+
 # --- Submissions (Create/Edit) ---
 @bolt_app.view("submit_new_event")
 def handle_event_sub(ack, body, view, client):
@@ -822,16 +881,39 @@ def trigger_reminders():
         today = datetime.now().date()
         total_sent = 0
 
-        def notify_subscribers(event_obj, message_text):
-            count = 0
-            subs = Subscription.query.filter_by(event_id=event_obj.id).all()
-            for sub in subs:
+        def notify(evt, msg):
+            cnt = 0
+            # 🆕 Only notify if they haven't registered yet? 
+            # Or notify everyone and let them confirm? 
+            # Decision: Notify everyone, but only show button if status is Pending.
+            for sub in Subscription.query.filter_by(event_id=evt.id).all():
                 try:
-                    bolt_app.client.chat_postMessage(channel=sub.user_slack_id, text=message_text)
-                    count += 1
-                except Exception as e:
-                    logger.error(f"Failed to DM user {sub.user_slack_id}: {e}")
-            return count
+                    blocks = [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": msg}}
+                    ]
+                    
+                    # 🆕 ADD CONFIRM BUTTON if Pending
+                    if sub.status == "Pending":
+                        blocks.append({
+                            "type": "actions",
+                            "elements": [{
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "✅ I Registered (등록 완료)"},
+                                "style": "primary",
+                                "value": str(evt.id),
+                                "action_id": "confirm_registration"
+                            }]
+                        })
+                    else:
+                        blocks.append({
+                            "type": "context",
+                            "elements": [{"type": "mrkdwn", "text": "✅ Status: Registered"}]
+                        })
+
+                    bolt_app.client.chat_postMessage(channel=sub.user_slack_id, text=msg, blocks=blocks)
+                    cnt += 1
+                except Exception as e: logger.error(f"Fail DM {sub.user_slack_id}: {e}")
+            return cnt
 
         for days_left in [0, 1, 2, 3]:
             target_date = today + timedelta(days=days_left)
@@ -841,13 +923,13 @@ def trigger_reminders():
             deadline_events = Event.query.filter_by(registration_deadline=target_date).all()
             for event in deadline_events:
                 msg = f"⚠️ *{event.event_type}* *{event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
-                total_sent += notify_subscribers(event, msg)
+                total_sent += notify(event, msg)
 
             # 2. Event Dates
             test_day_events = Event.query.filter_by(event_date=target_date).all()
             for event in test_day_events:
                 msg = f"📅 *이벤트 알림:* *{event.event_type}* *{event.title}*이 *{time_str}* 입니다 ({event.event_date})!"
-                total_sent += notify_subscribers(event, msg)
+                total_sent += notify(event, msg)
 
         return {"status": "success", "reminders_sent": total_sent}, 200
 
