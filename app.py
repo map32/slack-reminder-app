@@ -93,7 +93,7 @@ def get_sorted_events(user_id, category=None):
     events.sort(key=lambda x: (x.id not in subs, x.event_date))
     return events, subs
 
-def build_event_block(event, is_subscribed):
+def build_event_block(event, is_subscribed, is_admin=False):
     """Creates a single event row block."""
     btn_text = "구독 취소" if is_subscribed else "알림 구독"
     btn_style = "danger" if is_subscribed else "primary"
@@ -104,7 +104,7 @@ def build_event_block(event, is_subscribed):
         "type": "section",
         "text": {
             "type": "mrkdwn", 
-            "text": f"*{event.title}*\n📅 {date_str} | ⏰ Deadline: {deadline_str}"
+            "text": f"*{event.title}*\n📅 {date_str} | ⏰ 데드라인: {deadline_str}"
         },
         "accessory": {
             "type": "button",
@@ -112,7 +112,21 @@ def build_event_block(event, is_subscribed):
             "value": f"{event.id}|{'unsub' if is_subscribed else 'sub'}",
             "action_id": "toggle_subscription",
             "style": btn_style
-        }
+        },
+        "overflow": {
+            "type": "overflow",
+            "action_id": "event_actions",
+            "options": [
+                {
+                    "text": {"type": "plain_text", "text": "✏️ Edit"},
+                    "value": f"edit|{event.id}"
+                } if is_admin else None,
+                {
+                    "text": {"type": "plain_text", "text": "🗑️ Delete"},
+                    "value": f"delete|{event.id}"
+                } if is_admin else None
+            ]
+        } if is_admin else None
     }
 
 # -------------------------
@@ -423,6 +437,10 @@ def slack_actions():
     """Endpoint for Slack Interactivity (e.g., button clicks, modal submissions)"""
     return handler.handle(request)
 
+@flask_app.route("/keep-alive", methods=["GET"])
+def keep_alive():
+    return {"status": "alive"}, 200
+
 import secrets  # <--- Add this import
 
 @flask_app.route("/api/run-reminders", methods=["POST"])
@@ -473,18 +491,18 @@ def trigger_reminders():
             return count
 
         # Loop through 1, 2, and 3 days from now
-        for days_left in [1, 2, 3]:
+        for days_left in [0, 1, 2, 3]:
             target_date = today + timedelta(days=days_left)
             print(target_date)
             
             # Format "time string" for the message
             # e.g. "Tomorrow" or "in 3 days"
-            time_str = "내일" if days_left == 1 else f"{days_left}일 후"
+            time_str = "오늘" if days_left == 0 else "내일" if days_left == 1 else f"{days_left}일 후"
 
             # 1. Check REGISTRATION DEADLINES
             deadline_events = Event.query.filter_by(registration_deadline=target_date).all()
             for event in deadline_events:
-                msg = f"⚠️ *{event.event_type} {event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
+                msg = f"⚠️ *{event.event_type}* *{event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
                 total_sent += notify_subscribers(event, msg)
 
             # 2. Check ACTUAL EVENT DATES
