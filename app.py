@@ -540,7 +540,7 @@ def handle_nudge_pending(ack, respond, client, command):
 def open_send_message_modal(ack, body, client):
     ack()
     user_id = body["user_id"]
-    channel_id = body['channel']['id']
+    channel_id = body['channel_id']
     
     with flask_app.app_context():
         if not is_user_admin(user_id):
@@ -981,7 +981,7 @@ def handle_admin_sub_submission(ack, body, view, client):
         db.session.commit()
     
     # Notify Admin of success
-    client.chat_postEphemeral(channel=body['channel']['id'], user=body['user']['id'], text=msg)
+    client.chat_postEphemeral(channel=body['channel_id'], user=body['user_id'], text=msg)
 
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
