@@ -986,7 +986,6 @@ def handle_admin_sub_submission(ack, body, view, client):
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
     ack()
-    
     values = view["state"]["values"]
     selected_event = values["event_select"]["event_id"]["selected_option"]
     message_text = values["message"]["msg_text"]["value"]
@@ -1095,10 +1094,6 @@ def handle_event_search(ack, body):
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
         
-        logger.info(f"Found {len(events)} events matching '{search_value}'")
-        for e in events:
-            logger.info(f"  - {e.id}: {e.title} (deadline: {e.registration_deadline})")
-        
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
@@ -1114,21 +1109,18 @@ def handle_event_search(ack, body):
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
             })
-    
-    logger.info(f"Returning {len(options)} options")
     ack(options=options)
 
 @bolt_app.options("event_id")
 def handle_admin_event_search(ack, body):
     """Dynamically load events for admin subscription modal."""
-    search_value = body.get("value", "").strip().lower()
+    search_value = body.get("value", "").lower()
 
     with flask_app.app_context():
         events = Event.query.filter(
             Event.title.ilike(f"%{search_value}%"),
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
-        print(events)
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
