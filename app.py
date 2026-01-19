@@ -98,7 +98,7 @@ def get_sorted_events(user_id, category=None):
     # LEFT JOIN to get subscription status for this user
     query = db.session.query(
         Event,
-        (Subscription.id.isnot(None)).label('is_subscribed')
+        Subscription
     ).outerjoin(
         Subscription,
         (Event.id == Subscription.event_id) & (Subscription.user_slack_id == user_id)
