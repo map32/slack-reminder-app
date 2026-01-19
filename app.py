@@ -71,6 +71,12 @@ class Subscription(db.Model):
     status = db.Column(db.String(20), nullable=True)
     __table_args__ = (db.UniqueConstraint('user_slack_id', 'event_id', name='_user_event_uc'),)
 
+class AppConfig(db.Model):
+    """Stores global settings like the Consultant Channel ID"""
+    __tablename__ = 'app_config'
+    key = db.Column(db.String(50), primary_key=True) # e.g., "consultant_channel"
+    value = db.Column(db.String(200), nullable=False) # e.g., "C12345678"
+
 # Initialize DB and Seed Data
 with flask_app.app_context():
     db.create_all()
@@ -826,37 +832,38 @@ def open_admin_modal(ack, body, client):
 
 @bolt_app.action("confirm_registration")
 def handle_registration_confirm(ack, body, client):
-    """
-    🆕 HANDLER: Updates status when user clicks "I Have Registered"
-    """
     ack()
     user_id = body["user"]["id"]
     event_id = int(body["actions"][0]["value"])
     
     with flask_app.app_context():
         sub = Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first()
-        if sub:
+        if sub and sub.status == "Pending":
             sub.status = "Registered"
-            db.session.commit()
             
-            # Update the message to remove the button and show success
-            # We fetch the original blocks and replace the action block
-            original_text = body["message"]["text"]
-            client.chat_update(
-                channel=body["channel"]["id"],
-                ts=body["message"]["ts"],
-                text=original_text,
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": original_text} # Keep the reminder text
-                    },
-                    {
-                        "type": "context",
-                        "elements": [{"type": "mrkdwn", "text": "✅ *등록 확인 완료 (Confirmed Registration)*"}]
-                    }
-                ]
-            )
+            if body['message'] and body['message']['text']:
+                # 1. Update Student's Button (UI Refresh)
+                original_text = body["message"]["text"]
+                client.chat_update(
+                    channel=body["channel"]["id"],
+                    ts=body["message"]["ts"],
+                    text=original_text,
+                    blocks=[
+                        {"type": "section", "text": {"type": "mrkdwn", "text": original_text}},
+                        {"type": "context", "elements": [{"type": "mrkdwn", "text": "✅ *등록 확인 완료*"}]}
+                    ]
+                )
+
+            # 2. 🆕 SUCCESS FEED: Notify Consultants
+            config = AppConfig.query.get("consultant_channel")
+            if config:
+                event = Event.query.get(event_id)
+                client.chat_postMessage(
+                    channel=config.value,
+                    text=f"🎉 *등록 확인:* <@{user_id}> 님이 *{event.title}* 등록을 완료했습니다!"
+                )
+            
+            db.session.commit()
 
 # --- Submissions (Create/Edit) ---
 @bolt_app.view("submit_new_event")
@@ -1219,11 +1226,126 @@ def trigger_reminders():
                 msg = f"📅 *이벤트 알림:* *{event.event_type}* *{event.title}*이 *{time_str}* 입니다 ({event.event_date})!"
                 total_sent += notify(event, msg)
 
+    # 2. Run Consultant Briefing
+        try:
+            config = AppConfig.query.get("consultant_channel")
+            if config:
+                # Generate the fancy blocks
+                briefing_blocks = generate_morning_briefing(today)
+                
+                # Post to the consultant channel
+                bolt_app.client.chat_postMessage(
+                    channel=config.value,
+                    text="Morning Briefing", # Fallback text
+                    blocks=briefing_blocks
+                )
+                print("Briefing sent successfully.")
+        except Exception as e:
+            logger.error(f"Failed to send briefing: {e}")
+
         return {"status": "success", "reminders_sent": total_sent}, 200
 
     except Exception as e:
         logger.error(f"Cron failed: {e}")
         return {"error": str(e)}, 500
+
+def generate_morning_briefing(today):
+    """
+    Generates a Block Kit message for the daily Consultant Briefing in Korean.
+    Includes:
+    1. Red Zone: Deadlines in next 48 hours with Pending students.
+    2. Horizon: Events in next 7 days with status summary.
+    """
+    # Korean Date Format (e.g., 2026년 01월 20일)
+    date_str = today.strftime('%Y년 %m월 %d일')
+    
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"🌅 모닝 브리핑: {date_str}"}},
+        {"type": "divider"}
+    ]
+    
+    # --- SECTION 1: 🚨 THE RED ZONE (Urgent Deadlines) ---
+    # Look for deadlines Today (0) and Tomorrow (1)
+    urgent_found = False
+    
+    for d in [0, 1]:
+        target_date = today + timedelta(days=d)
+        time_str = "오늘" if d == 0 else "내일"
+        
+        # Find events with deadlines on this day
+        deadlines = Event.query.filter_by(registration_deadline=target_date).all()
+        
+        for e in deadlines:
+            # Find who hasn't registered yet
+            pending_subs = Subscription.query.filter_by(event_id=e.id, status="Pending").all()
+            
+            if pending_subs:
+                urgent_found = True
+                names = [f"<@{s.user_slack_id}>" for s in pending_subs]
+                student_list = ", ".join(names)
+                
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn", 
+                        "text": f"🚨 *긴급 점검: {e.title}*\n등록 마감이 *{time_str}* 입니다!"
+                    }
+                })
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"⚠️ *미등록 학생 {len(pending_subs)}명:* {student_list}"}]
+                })
+                # Actionable Tip
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"👉 *조치:* `/nudge-pending {e.id}` 명령어로 독촉 알림 보내기"}]
+                })
+            else:
+                # If everyone registered, show a mini success message
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"✅ *{e.title}* (마감 {time_str}): 구독한 모든 학생이 등록을 완료했습니다."}
+                })
+
+    if not urgent_found:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "✅ *긴급 사항 없음:* 48시간 내 마감되는 일정의 등록이 모두 완료되었습니다."}
+        })
+
+    blocks.append({"type": "divider"})
+
+    # --- SECTION 2: 📅 THE HORIZON (Next 7 Days) ---
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*📅 다가오는 일정 (향후 7일)*"}})
+    
+    horizon_found = False
+    end_date = today + timedelta(days=7)
+    
+    # Query events happening between tomorrow and 7 days from now
+    upcoming_events = Event.query.filter(Event.event_date > today, Event.event_date <= end_date).order_by(Event.event_date).all()
+    
+    if upcoming_events:
+        text_lines = ""
+        for e in upcoming_events:
+            # Calculate status summary
+            total = Subscription.query.filter_by(event_id=e.id).count()
+            pending = Subscription.query.filter_by(event_id=e.id, status="Pending").count()
+            registered = total - pending
+            
+            # Status Logic: Green if all registered, Yellow if <3 pending, Red otherwise
+            status_icon = "🟢" if pending == 0 else "🟡" if pending < 3 else "🔴"
+            date_pretty = e.event_date.strftime('%m/%d')
+            
+            text_lines += f"{status_icon} *{date_pretty}:* {e.title} ({total}명 중 {registered}명 완료)\n"
+        
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": text_lines}
+        })
+    else:
+         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "이번 주 예정된 이벤트가 없습니다."}]})
+
+    return blocks
 
 if __name__ == "__main__":
     flask_app.run(port=3000)
