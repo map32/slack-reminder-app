@@ -77,6 +77,19 @@ class AppConfig(db.Model):
     key = db.Column(db.String(50), primary_key=True) # e.g., "consultant_channel"
     value = db.Column(db.String(200), nullable=False) # e.g., "C12345678"
 
+class TrackedStudent(db.Model):
+    """
+    Mapping: Which Consultant (Admin) is tracking which Student.
+    One consultant can track many students.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    consultant_id = db.Column(db.String(50), nullable=False) # The Admin
+    student_id = db.Column(db.String(50), nullable=False)    # The Student
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Prevent duplicate tracking entries
+    __table_args__ = (db.UniqueConstraint('consultant_id', 'student_id', name='_consultant_student_uc'),)
+
 # Initialize DB and Seed Data
 with flask_app.app_context():
     db.create_all()
@@ -605,6 +618,125 @@ def open_send_message_modal(ack, body, client):
             ]
         }
     )
+
+@bolt_app.command("/track")
+def handle_track_command(ack, respond, command):
+    ack()
+    
+    admin_id = command["user_id"]
+    text = command["text"].strip()
+    parts = text.split()
+    
+    # 1. Permission Check
+    with flask_app.app_context():
+        if not is_user_admin(admin_id):
+            respond("🚫 관리자 권한이 없습니다.")
+            return
+
+        # 2. Logic Router
+        if not parts:
+            respond("⚠️ 사용법:\n`/track add @User`\n`/track remove @User`\n`/track list`\n`/track @User` (상세 조회)")
+            return
+
+        action = parts[0].lower()
+
+        # --- ACTION: ADD ---
+        if action == "add":
+            if len(parts) < 2:
+                respond("⚠️ 추가할 유저를 선택해주세요. 예: `/track add @John`")
+                return
+            
+            target_id = parse_user_id(parts[1])
+            if not target_id:
+                respond("⚠️ 유효한 유저 태그가 아닙니다.")
+                return
+
+            if not TrackedStudent.query.filter_by(consultant_id=admin_id, student_id=target_id).first():
+                db.session.add(TrackedStudent(consultant_id=admin_id, student_id=target_id))
+                db.session.commit()
+                respond(f"✅ 이제 <@{target_id}> 학생을 추적 관리합니다.")
+            else:
+                respond(f"ℹ️ <@{target_id}> 학생은 이미 추적 목록에 있습니다.")
+
+        # --- ACTION: REMOVE ---
+        elif action == "remove":
+            if len(parts) < 2:
+                respond("⚠️ 삭제할 유저를 선택해주세요.")
+                return
+            
+            target_id = parse_user_id(parts[1])
+            if not target_id: return
+
+            entry = TrackedStudent.query.filter_by(consultant_id=admin_id, student_id=target_id).first()
+            if entry:
+                db.session.delete(entry)
+                db.session.commit()
+                respond(f"🗑️ <@{target_id}> 학생을 추적 목록에서 제거했습니다.")
+            else:
+                respond(f"⚠️ 목록에 없는 학생입니다.")
+
+        # --- ACTION: LIST ---
+        elif action == "list":
+            tracked = TrackedStudent.query.filter_by(consultant_id=admin_id).all()
+            if not tracked:
+                respond("📭 현재 추적 중인 학생이 없습니다.")
+                return
+            
+            msg = "*📋 내 담당 학생 리스트 (My Roster):*\n"
+            for t in tracked:
+                msg += f"• <@{t.student_id}>\n"
+            respond(msg)
+
+        # --- ACTION: VIEW DETAILS (Default) ---
+        # If input is just "@User" or "show @User"
+        else:
+            # Handle "/track @User" case
+            target_id = parse_user_id(action) 
+            # Handle "/track show @User" case (optional safety)
+            if not target_id and len(parts) > 1:
+                target_id = parse_user_id(parts[1])
+
+            if not target_id:
+                respond("⚠️ 알 수 없는 명령어입니다.")
+                return
+
+            # Fetch Student Details
+            subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.user_slack_id == target_id).order_by(Event.event_date).all()
+            
+            if not subs:
+                respond(f"📂 <@{target_id}> 학생은 현재 구독 중인 이벤트가 없습니다.")
+                return
+
+            # Build Report
+            response_text = f"*👤 학생 분석 보고서: <@{target_id}>*\n\n"
+            
+            today = datetime.now().date()
+            
+            upcoming_txt = ""
+            history_txt = ""
+            
+            for sub, event in subs:
+                status_icon = "✅" if sub.status == "Registered" else "⏳"
+                status_text = "등록 완료" if sub.status == "Registered" else "미등록 (Pending)"
+                
+                line = f"• {status_icon} *{event.title}* | 📅 {event.event_date} | 상태: *{status_text}*\n"
+                
+                if event.event_date >= today:
+                    # Highlight urgent deadlines
+                    if sub.status == "Pending" and event.registration_deadline <= (today + timedelta(days=3)):
+                        line += f"    🚨 *경고: 마감 임박 ({event.registration_deadline})*\n"
+                    upcoming_txt += line
+                else:
+                    history_txt += line
+
+            if upcoming_txt:
+                response_text += "*📅 예정된 일정 (Upcoming):*\n" + upcoming_txt + "\n"
+            
+            if history_txt:
+                 # Optional: Only show history if requested, or keep it short
+                response_text += "*📜 지난 일정 (History):*\n" + history_txt
+
+            respond(response_text)
 
 @bolt_app.command("/admin-sub")
 def open_admin_sub_modal(ack, body, client, command):
