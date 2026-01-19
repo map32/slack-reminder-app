@@ -1084,7 +1084,6 @@ def handle_event_overflow(ack, body, client):
 @bolt_app.options("event_search")
 def handle_event_search(ack, body):
     """Dynamically load events based on user search query."""
-    ack()
     search_value = body.get("value", "").lower()
     
     with flask_app.app_context():
@@ -1115,7 +1114,6 @@ def handle_event_search(ack, body):
 @bolt_app.options("event_id")
 def handle_admin_event_search(ack, body):
     """Dynamically load events for admin subscription modal."""
-    ack()
     search_value = body.get("value", "").lower()
     
     with flask_app.app_context():
@@ -1123,7 +1121,7 @@ def handle_admin_event_search(ack, body):
             Event.title.ilike(f"%{search_value}%"),
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
-        
+
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
