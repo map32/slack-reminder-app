@@ -529,6 +529,76 @@ def handle_nudge_pending(ack, respond, client, command):
 
         respond(f"📨 *{event.title}*: 미등록 학생 *{count}명*에게 알림을 발송했습니다.")
 
+#sends messages to all students subscribed to an event
+@bolt_app.command("/send-event-message")
+def open_send_message_modal(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    channel_id = body['channel']['id']
+    
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+        
+        # Fetch upcoming events
+        events = Event.query.filter(Event.registration_deadline >= datetime.now().date())\
+                            .order_by(Event.event_date)\
+                            .limit(100).all()
+        
+        event_options = []
+        for e in events:
+            date_str = e.event_date.strftime('%Y-%m-%d')
+            safe_title = e.title
+            safe_cat = e.event_type
+            occupied_len = len(safe_cat) + len(date_str) + 2
+            if len(safe_title) > 75 - (occupied_len + 6):
+                safe_title = safe_title[:occupied_len - 6] + "..."
+            
+            label_text = f"{safe_cat} {safe_title} ({date_str})"
+            event_options.append({
+                "text": {"type": "plain_text", "text": label_text},
+                "value": str(e.id)
+            })
+    
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_send_event_message",
+            "title": {"type": "plain_text", "text": "Send Event Message"},
+            "submit": {"type": "plain_text", "text": "Send"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "이벤트를 선택하고 메시지를 작성하세요."}
+                },
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (검색)"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_search",
+                        "placeholder": {"type": "plain_text", "text": "이벤트 이름 검색..."},
+                        "min_query_length": 1
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "message",
+                    "label": {"type": "plain_text", "text": "메시지"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "msg_text",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "보낼 메시지를 입력하세요"}
+                    }
+                }
+            ]
+        }
+    )
+
 @bolt_app.command("/admin-sub")
 def open_admin_sub_modal(ack, body, client, command):
     ack()
@@ -597,15 +667,17 @@ def open_admin_sub_modal(ack, body, client, command):
                     "block_id": "sub_type",
                     "label": {"type": "plain_text", "text": "모드"},
                     "element": {
-                        "type": "static_select",
-                        "action_id": "mode_select",
-                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
-                        "options": [
-                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
-                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
-                            {"text": {"type": "plain_text", "text": "전체"}, "value": "all"}
-                        ]
-                    }
+                        "type": "input",
+                        "block_id": "event_select",
+                        "optional": True, 
+                        "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
+                        "element": {
+                            "type": "external_select",
+                            "action_id": "event_id",
+                            "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                            "min_query_length": 1
+                        }
+                    },
                 },
                 # Input 3: Event Picker (Searchable Dropdown)
                 # Note: This is optional because "All" doesn't need it.
@@ -932,7 +1004,55 @@ def handle_admin_sub_submission(ack, body, view, client):
         db.session.commit()
     
     # Notify Admin of success
-    client.chat_postMessage(channel=admin_id, text=msg)
+    client.chat_postEphemeral(channel=body['channel']['id'], user=body['user']['id'], text=msg)
+
+@bolt_app.view("submit_send_event_message")
+def handle_send_message_submission(ack, body, view, client):
+    ack()
+    
+    values = view["state"]["values"]
+    selected_event = values["event_select"]["event_id"]["selected_option"]
+    message_text = values["message"]["msg_text"]["value"]
+    admin_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    
+    if not selected_event or selected_event["value"] == "none":
+        client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+        return
+    
+    event_id = int(selected_event["value"])
+    
+    with flask_app.app_context():
+        event = Event.query.get(event_id)
+        if not event:
+            client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 찾을 수 없습니다.")
+            return
+        
+        # Get all subscriptions for this event
+        subs = Subscription.query.filter_by(event_id=event_id).all()
+        
+        if not subs:
+            client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"ℹ️ *{event.title}*: 구독한 학생이 없습니다.")
+            return
+        
+        count = 0
+        for sub in subs:
+            try:
+                client.chat_postMessage(
+                    channel=sub.user_slack_id,
+                    text=message_text,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": message_text}
+                        }
+                    ]
+                )
+                count += 1
+            except Exception as e:
+                logger.error(f"Failed to send message to {sub.user_slack_id}: {e}")
+        
+        client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"📨 *{event.title}*: {count}명에게 메시지를 발송했습니다.")
 
 # --- Interactive Actions ---
 
@@ -983,6 +1103,67 @@ def handle_event_overflow(ack, body, client):
                 Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).delete()
             db.session.commit()
             client.views_publish(user_id=user_id, view={"type": "home", "blocks": get_dashboard_view(user_id)})
+
+@bolt_app.options("event_search")
+def handle_event_search(ack, body):
+    """Dynamically load events based on user search query."""
+    ack()
+    search_value = body.get("value", "").lower()
+    
+    with flask_app.app_context():
+        # Search events by title
+        events = Event.query.filter(
+            Event.title.ilike(f"%{search_value}%"),
+            Event.registration_deadline >= datetime.now().date()
+        ).limit(100).all()
+        
+        options = []
+        for e in events:
+            date_str = e.event_date.strftime('%Y-%m-%d')
+            safe_title = e.title
+            safe_cat = e.event_type
+            occupied_len = len(safe_cat) + len(date_str) + 5  # " - " + " ()"
+            
+            if len(safe_title) > 75 - occupied_len:
+                safe_title = safe_title[:max(0, 75 - occupied_len - 3)] + "..."
+            
+            label_text = f"{safe_cat} - {safe_title} ({date_str})"
+            options.append({
+                "text": {"type": "plain_text", "text": label_text},
+                "value": str(e.id)
+            })
+    
+    ack(options=options)
+
+@bolt_app.options("event_id")
+def handle_admin_event_search(ack, body):
+    """Dynamically load events for admin subscription modal."""
+    ack()
+    search_value = body.get("value", "").lower()
+    
+    with flask_app.app_context():
+        events = Event.query.filter(
+            Event.title.ilike(f"%{search_value}%"),
+            Event.registration_deadline >= datetime.now().date()
+        ).limit(100).all()
+        
+        options = []
+        for e in events:
+            date_str = e.event_date.strftime('%Y-%m-%d')
+            safe_title = e.title
+            safe_cat = e.event_type
+            occupied_len = len(safe_cat) + len(date_str) + 5
+            
+            if len(safe_title) > 75 - occupied_len:
+                safe_title = safe_title[:max(0, 75 - occupied_len - 3)] + "..."
+            
+            label_text = f"{safe_cat} - {safe_title} ({date_str})"
+            options.append({
+                "text": {"type": "plain_text", "text": label_text},
+                "value": str(e.id)
+            })
+    
+    ack(options=options)
 
 # -------------------------
 # 5. Flask Routes
