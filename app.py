@@ -951,7 +951,7 @@ def handle_admin_sub_submission(ack, body, view, client):
             
             # Subscribe
             if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event_id).first():
-                db.session.add(Subscription(user_slack_id=target_user, event_id=event_id))
+                db.session.add(Subscription(user_slack_id=target_user, event_id=event_id, status='Pending'))
                 msg = f"✅ <@{target_user}> 님을 *{event.title}*에 구독시켰습니다."
             else:
                 msg = f"ℹ️ <@{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
@@ -969,7 +969,7 @@ def handle_admin_sub_submission(ack, body, view, client):
             count = 0
             for event in cat_events:
                 if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id))
+                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
             msg = f"✅ <@{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
 
@@ -979,7 +979,7 @@ def handle_admin_sub_submission(ack, body, view, client):
             count = 0
             for event in all_events:
                 if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id))
+                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
             msg = f"✅ <@{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
 
