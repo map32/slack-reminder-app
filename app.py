@@ -289,7 +289,7 @@ def get_dashboard_view(user_id):
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "이벤트 없음"}]})
         else:
             for event in display_events:
-                blocks.append(build_event_block(event, subs[event.id], is_admin))
+                blocks.append(build_event_block(event, subs[event.id] if event.id in subs.keys() else None, is_admin))
         
         # "View All" Button
         if len(events) > len(display_events):
@@ -323,7 +323,7 @@ def get_category_view(user_id, category, page=0):
     ]
     
     for event in current_slice:
-        blocks.append(build_event_block(event, subs[event.id], is_admin))
+        blocks.append(build_event_block(event, subs[event.id] if event.id in subs.keys() else None, is_admin))
         blocks.append({"type": "divider"})
     
     # Pagination
