@@ -117,7 +117,7 @@ def get_sorted_events(user_id, category=None):
     
     # Extract events and build subscription set
     events = [row[0] for row in results]
-    subs = {row[0].id for row in results if row[1]}
+    subs = {row[0].id: row[1] for row in results if row[1]}
     
     return events, subs
 
@@ -154,14 +154,15 @@ def parse_user_id(text):
     match = re.search(r"<@(U[A-Z0-9]+)(\|.*?)?>", text)
     return match.group(1) if match else None
 
-def build_event_block(event, is_subscribed, is_admin=False):
+def build_event_block(event, subscription, is_admin=False):
     """
     Creates event blocks. 
     Returns a LIST of blocks to accommodate the status button.
     """
     date_str = event.event_date.strftime('%Y-%m-%d')
     deadline_str = event.registration_deadline.strftime('%Y-%m-%d')
-    status = event.status
+    is_subscribed = subscription is not None
+    status = subscription.status if is_subscribed else None
     # Common Text
     text_section = {
         "type": "mrkdwn", 
@@ -288,7 +289,7 @@ def get_dashboard_view(user_id):
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "이벤트 없음"}]})
         else:
             for event in display_events:
-                blocks.append(build_event_block(event, event.id in subs, is_admin))
+                blocks.append(build_event_block(event, subs[event.id], is_admin))
         
         # "View All" Button
         if len(events) > len(display_events):
@@ -322,7 +323,7 @@ def get_category_view(user_id, category, page=0):
     ]
     
     for event in current_slice:
-        blocks.append(build_event_block(event, event.id in subs, is_admin))
+        blocks.append(build_event_block(event, subs[event.id], is_admin))
         blocks.append({"type": "divider"})
     
     # Pagination
