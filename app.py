@@ -1084,7 +1084,9 @@ def handle_event_overflow(ack, body, client):
 @bolt_app.options("event_search")
 def handle_event_search(ack, body):
     """Dynamically load events based on user search query."""
-    search_value = body.get("value", "").strip().lower()
+    search_value = body.get("value", "").lower()
+    
+    logger.info(f"🔍 Search value: '{search_value}'")
     
     with flask_app.app_context():
         # Search events by title
@@ -1092,23 +1094,28 @@ def handle_event_search(ack, body):
             Event.title.ilike(f"%{search_value}%"),
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
-        print(events)
+        
+        logger.info(f"Found {len(events)} events matching '{search_value}'")
+        for e in events:
+            logger.info(f"  - {e.id}: {e.title} (deadline: {e.registration_deadline})")
+        
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
             safe_title = e.title
             safe_cat = e.event_type
-            occupied_len = len(date_str) + 5  # " - " + " ()"
+            occupied_len = len(safe_cat) + len(date_str) + 5
             
             if len(safe_title) > 75 - occupied_len:
                 safe_title = safe_title[:max(0, 75 - occupied_len - 3)] + "..."
             
-            label_text = f"{safe_title} ({date_str})"
+            label_text = f"{safe_cat} - {safe_title} ({date_str})"
             options.append({
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
             })
     
+    logger.info(f"Returning {len(options)} options")
     ack(options=options)
 
 @bolt_app.options("event_id")
