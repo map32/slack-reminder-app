@@ -841,7 +841,8 @@ def handle_registration_confirm(ack, body, client):
         if sub and sub.status == "Pending":
             sub.status = "Registered"
             
-            if body['message'] and body['message']['text']:
+            # Check if message exists (it may not in all contexts)
+            if body.get('message') and body['message'].get('text'):
                 # 1. Update Student's Button (UI Refresh)
                 original_text = body["message"]["text"]
                 client.chat_update(
