@@ -60,7 +60,7 @@ class AppAdmin(db.Model):
 class Event(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
-    event_type = db.Column(db.String(50), nullable=False) 
+    event_type = db.Column(db.String(50), db.ForeignKey('event_type.name'), nullable=False)
     event_date = db.Column(db.Date, nullable=False)
     registration_deadline = db.Column(db.Date, nullable=False)
 
@@ -91,19 +91,34 @@ def is_user_admin(user_id):
     return db.session.query(AppAdmin).filter_by(user_slack_id=user_id).first() is not None
 
 def get_sorted_events(user_id, category=None):
-    """Fetches events, sorting by: 1. Subscribed (True first) 2. Date (Soonest first)"""
-    today = datetime.now().date()
-    query = Event.query
-    if category:
-        query = query.filter_by(event_type=category).filter(Event.event_date >= today)
+    """Fetches events with subscription status via JOIN, sorted by subscription and date."""
     
-    events = query.order_by(Event.event_date).all()
-    subs = {s.event_id for s in Subscription.query.filter_by(user_slack_id=user_id).all()}
-
-    # Python sort: False sorts before True, so we negate logic or use tuple
-    # (Not Subscribed?, Date) -> True comes after False. 
-    # So Subscribed (False) comes first.
-    events.sort(key=lambda x: (x.id not in subs, x.event_date))
+    today = datetime.now().date()
+    
+    # LEFT JOIN to get subscription status for this user
+    query = db.session.query(
+        Event,
+        (Subscription.id.isnot(None)).label('is_subscribed')
+    ).outerjoin(
+        Subscription,
+        (Event.id == Subscription.event_id) & (Subscription.user_slack_id == user_id)
+    ).filter(Event.registration_deadline >= today)
+    
+    if category:
+        query = query.filter(Event.event_type == category)
+    
+    # Sort: subscribed first, then by date
+    query = query.order_by(
+        (Subscription.id.is_(None)),  # False (subscribed) comes first
+        Event.event_date
+    )
+    
+    results = query.all()
+    
+    # Extract events and build subscription set
+    events = [row[0] for row in results]
+    subs = {row[0].id for row in results if row[1]}
+    
     return events, subs
 
 def find_event_by_query(query_text):
@@ -136,7 +151,6 @@ def find_event_by_query(query_text):
 
 def parse_user_id(text):
     """Extracts U12345 from text like '<@U12345|name>'"""
-    import re
     match = re.search(r"<@(U[A-Z0-9]+)(\|.*?)?>", text)
     return match.group(1) if match else None
 
@@ -407,17 +421,20 @@ def handle_list_subs(ack, respond, command):
         if target_id != user_id and not is_user_admin(user_id):
             respond("🚫 다른 유저의 구독 리스트는 관리자만 볼 수 있습니다.")
             return
-        subs = Subscription.query.filter_by(user_slack_id=target_id).all()
+        
+        # Use JOIN to fetch subscriptions and events in one query
+        subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.user_slack_id == target_id).all()
+        
         if not subs:
             respond(f"<@{target_id}> 님은 구독 중인 이벤트가 없습니다.")
             return
         
         response = f"*📋 <@{target_id}> 님의 구독 리스트:*\n"
-        for sub in subs:
-            event = Event.query.get(sub.event_id)
-            status = "미등록" if event.status == 'Pending' else '등록완료'
+        for sub, event in subs:
+            status = "미등록" if sub.status == 'Pending' else '등록완료'
             if event and event.registration_deadline >= datetime.now().date():
                 response += f"• {event.title} - {event.event_date} 데드라인: {event.registration_deadline} *{status}*\n"
+        
         respond(response)
 
 @bolt_app.command("/check-pending")
