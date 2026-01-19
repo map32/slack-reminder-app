@@ -572,6 +572,7 @@ def open_send_message_modal(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "submit_send_event_message",
+            "private_metadata": channel_id,
             "title": {"type": "plain_text", "text": "Send Event Message"},
             "submit": {"type": "plain_text", "text": "Send"},
             "blocks": [
@@ -609,6 +610,7 @@ def open_send_message_modal(ack, body, client):
 def open_admin_sub_modal(ack, body, client, command):
     ack()
     user_id = command["user_id"]
+    channel_id = body['channel_id']
     # 1. Fetch upcoming events for the dropdown
     with flask_app.app_context():
         if not is_user_admin(user_id):
@@ -621,6 +623,7 @@ def open_admin_sub_modal(ack, body, client, command):
         view={
             "type": "modal",
             "callback_id": "submit_admin_sub",
+            "private_metadata": channel_id,
             "title": {"type": "plain_text", "text": "구독"},
             "submit": {"type": "plain_text", "text": "유저 구독하기"},
             "blocks": [
@@ -647,6 +650,7 @@ def open_admin_sub_modal(ack, body, client, command):
                     "element": {
                         "type": "static_select",
                         "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
                         "options": [
                             {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
                             {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
@@ -929,6 +933,7 @@ def handle_admin_sub_submission(ack, body, view, client):
     
     # Context info
     admin_id = body["user"]["id"]
+    channel_id = view["private_metadata"]
     msg = ""
 
     with flask_app.app_context():
@@ -981,7 +986,7 @@ def handle_admin_sub_submission(ack, body, view, client):
         db.session.commit()
     
     # Notify Admin of success
-    client.chat_postEphemeral(channel=body['channel_id'], user=body['user_id'], text=msg)
+    client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
 
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
@@ -990,7 +995,7 @@ def handle_send_message_submission(ack, body, view, client):
     selected_event = values["event_select"]["event_id"]["selected_option"]
     message_text = values["message"]["msg_text"]["value"]
     admin_id = body["user"]["id"]
-    channel_id = body["channel"]["id"]
+    channel_id = view["private_metadata"]
     
     if not selected_event or selected_event["value"] == "none":
         client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
