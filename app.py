@@ -608,34 +608,6 @@ def open_admin_sub_modal(ack, body, client, command):
         if not is_user_admin(user_id):
             client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
             return
-        
-        # Slack Dropdowns have a limit of 100 items. 
-        # We fetch the next 100 future events.
-        events = Event.query.filter(Event.registration_deadline >= datetime.now().date())\
-                            .order_by(Event.event_date)\
-                            .limit(100).all()
-        
-        # Format for Slack Option Object
-        event_options = []
-        for e in events:
-            date_str = e.event_date.strftime('%Y-%m-%d')
-            
-            # 1. Calculate how much space we have left for the title
-            # Slack limit is 75. Date part takes ~12 chars (" (2024-01-01)").
-            # So we have roughly 60 chars safe for the title.
-            safe_title = e.title
-            safe_cat = e.event_type
-            occupied_len = len(safe_cat) + len(date_str) + 2
-            if len(safe_title) > 75 - (occupied_len + 6):
-                safe_title = safe_title[:occupied_len - 6] + "..."  # Truncate and add ellipsis
-
-            # 2. Create the label using the safe title
-            label_text = f"{safe_cat} {safe_title} ({date_str})"
-            
-            event_options.append({
-                "text": {"type": "plain_text", "text": label_text},
-                "value": str(e.id)
-            })
 
     # 2. Open the Modal
     client.views_open(
@@ -667,17 +639,14 @@ def open_admin_sub_modal(ack, body, client, command):
                     "block_id": "sub_type",
                     "label": {"type": "plain_text", "text": "모드"},
                     "element": {
-                        "type": "input",
-                        "block_id": "event_select",
-                        "optional": True, 
-                        "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
-                        "element": {
-                            "type": "external_select",
-                            "action_id": "event_id",
-                            "placeholder": {"type": "plain_text", "text": "검색어 입력"},
-                            "min_query_length": 1
-                        }
-                    },
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
                 },
                 # Input 3: Event Picker (Searchable Dropdown)
                 # Note: This is optional because "All" doesn't need it.
@@ -687,10 +656,10 @@ def open_admin_sub_modal(ack, body, client, command):
                     "optional": True, 
                     "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
                     "element": {
-                        "type": "static_select",
+                        "type": "external_select",
                         "action_id": "event_id",
                         "placeholder": {"type": "plain_text", "text": "검색어 입력"},
-                        "options": event_options if event_options else [{"text": {"type": "plain_text", "text": "이벤트 없음"}, "value": "none"}]
+                        "min_query_length": 1
                     }
                 },
                 # Input 4: Category Picker (Only needed if Mode is Category)
