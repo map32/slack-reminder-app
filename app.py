@@ -1048,7 +1048,7 @@ def handle_toggle(ack, body, client):
     with flask_app.app_context():
         if action == "sub":
             if not Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first():
-                db.session.add(Subscription(user_slack_id=user_id, event_id=event_id))
+                db.session.add(Subscription(user_slack_id=user_id, event_id=event_id, status='Pending'))
         else:
             Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).delete()
         db.session.commit()
@@ -1079,7 +1079,7 @@ def handle_event_overflow(ack, body, client):
         with flask_app.app_context():
             if action == "sub":
                 if not Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first():
-                    db.session.add(Subscription(user_slack_id=user_id, event_id=event_id))
+                    db.session.add(Subscription(user_slack_id=user_id, event_id=event_id, status='Pending'))
             else:
                 Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).delete()
             db.session.commit()
