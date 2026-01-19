@@ -1084,7 +1084,7 @@ def handle_event_overflow(ack, body, client):
 @bolt_app.options("event_search")
 def handle_event_search(ack, body):
     """Dynamically load events based on user search query."""
-    search_value = body.get("value", "").lower()
+    search_value = body.get("value", "").strip().lower()
     
     with flask_app.app_context():
         # Search events by title
@@ -1092,18 +1092,18 @@ def handle_event_search(ack, body):
             Event.title.ilike(f"%{search_value}%"),
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
-        
+        print(events)
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
             safe_title = e.title
             safe_cat = e.event_type
-            occupied_len = len(safe_cat) + len(date_str) + 5  # " - " + " ()"
+            occupied_len = len(date_str) + 5  # " - " + " ()"
             
             if len(safe_title) > 75 - occupied_len:
                 safe_title = safe_title[:max(0, 75 - occupied_len - 3)] + "..."
             
-            label_text = f"{safe_cat} - {safe_title} ({date_str})"
+            label_text = f"{safe_title} ({date_str})"
             options.append({
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
@@ -1114,25 +1114,25 @@ def handle_event_search(ack, body):
 @bolt_app.options("event_id")
 def handle_admin_event_search(ack, body):
     """Dynamically load events for admin subscription modal."""
-    search_value = body.get("value", "").lower()
-    
+    search_value = body.get("value", "").strip().lower()
+
     with flask_app.app_context():
         events = Event.query.filter(
             Event.title.ilike(f"%{search_value}%"),
             Event.registration_deadline >= datetime.now().date()
         ).limit(100).all()
-
+        print(events)
         options = []
         for e in events:
             date_str = e.event_date.strftime('%Y-%m-%d')
             safe_title = e.title
             safe_cat = e.event_type
-            occupied_len = len(safe_cat) + len(date_str) + 5
+            occupied_len = len(date_str) + 5
             
             if len(safe_title) > 75 - occupied_len:
                 safe_title = safe_title[:max(0, 75 - occupied_len - 3)] + "..."
             
-            label_text = f"{safe_cat} - {safe_title} ({date_str})"
+            label_text = f"{safe_title} ({date_str})"
             options.append({
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
