@@ -16,6 +16,9 @@ from slack_bolt.adapter.flask import SlackRequestHandler
 # -------------------------
 load_dotenv()
 
+# At the top of your file, make sure you know your App ID
+# You can hardcode it, or get it from env vars.
+APP_ID = os.getenv("SLACK_APP_ID", "A0A6X1SAT1B") # Find this in "Basic Information"
 # Load Env Variables
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
@@ -47,8 +50,8 @@ logger = logging.getLogger(__name__)
 
 # -------------------------
 # 2. Database Models
-# -------------------------
-class EventType(db.Model):
+# -----------p--------------
+class EventTye(db.Model):
     """Dynamic list of event categories (SAT, AP, Soccer, etc.)"""
     name = db.Column(db.String(50), primary_key=True)
 
@@ -64,12 +67,16 @@ class Event(db.Model):
     event_date = db.Column(db.Date, nullable=False)
     registration_deadline = db.Column(db.Date, nullable=False)
 
+class EventType(db.Model):
+    __tablename__ = 'event_type'
+    name = db.Column(db.String(50), primary_key='True')
+
 class Subscription(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_slack_id = db.Column(db.String(50), nullable=False)
+    channel_id = db.Column(db.String(50), nullable=False)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     status = db.Column(db.String(20), nullable=True)
-    __table_args__ = (db.UniqueConstraint('user_slack_id', 'event_id', name='_user_event_uc'),)
+    __table_args__ = (db.UniqueConstraint('channel_id', 'event_id', name='_user_event_uc'),)
 
 class AppConfig(db.Model):
     """Stores global settings like the Consultant Channel ID"""
@@ -84,11 +91,11 @@ class TrackedStudent(db.Model):
     """
     id = db.Column(db.Integer, primary_key=True)
     consultant_id = db.Column(db.String(50), nullable=False) # The Admin
-    student_id = db.Column(db.String(50), nullable=False)    # The Student
+    channel_id = db.Column(db.String(50), nullable=False)    # The Student
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Prevent duplicate tracking entries
-    __table_args__ = (db.UniqueConstraint('consultant_id', 'student_id', name='_consultant_student_uc'),)
+    __table_args__ = (db.UniqueConstraint('consultant_id', 'channel_id', name='_consultant_student_uc'),)
 
 # Initialize DB and Seed Data
 with flask_app.app_context():
@@ -109,7 +116,7 @@ def is_user_admin(user_id):
         return True
     return db.session.query(AppAdmin).filter_by(user_slack_id=user_id).first() is not None
 
-def get_sorted_events(user_id, category=None):
+def get_sorted_events(channel_id, category=None):
     """Fetches events with subscription status via JOIN, sorted by subscription and date."""
     
     today = datetime.now().date()
@@ -120,7 +127,7 @@ def get_sorted_events(user_id, category=None):
         Subscription
     ).outerjoin(
         Subscription,
-        (Event.id == Subscription.event_id) & (Subscription.user_slack_id == user_id)
+        (Event.id == Subscription.event_id) & (Subscription.channel_id == channel_id)
     ).filter(Event.registration_deadline >= today)
     
     if category:
@@ -173,6 +180,12 @@ def parse_user_id(text):
     match = re.search(r"<@(U[A-Z0-9]+)(\|.*?)?>", text)
     return match.group(1) if match else None
 
+def parse_channel_id(text):
+    """Extracts U12345 from text like '<#C12345|general>'"""
+    match = re.search(r"<#(C[A-Z0-9]+)(\|.*?)?>", text)
+    return match.group(1) if match else None
+
+
 def build_event_block(event, subscription, is_admin=False):
     """
     Creates event blocks. 
@@ -190,38 +203,23 @@ def build_event_block(event, subscription, is_admin=False):
 
     # --- ADMIN VIEW (Overflow Menu) ---
     if is_admin:
-        sub_text = "구독 취소" if is_subscribed else "알림 구독"
-        sub_action = "unsub" if is_subscribed else "sub"
         
         accessory = {
             "type": "overflow",
             "action_id": "event_actions",
             "options": [
-                {"text": {"type": "plain_text", "text": sub_text}, "value": f"{sub_action}|{event.id}"},
                 {"text": {"type": "plain_text", "text": "✏️ Edit"}, "value": f"edit|{event.id}"},
                 {"text": {"type": "plain_text", "text": "🗑️ Delete"}, "value": f"delete|{event.id}"}
             ]
         }
 
-    # --- USER VIEW (Big Button) ---
-    else:
-        btn_text = "구독 취소" if is_subscribed else "알림 구독"
-        btn_style = "danger" if is_subscribed else "primary"
-        
-        accessory = {
-            "type": "button",
-            "text": {"type": "plain_text", "text": btn_text},
-            "value": f"{event.id}|{'unsub' if is_subscribed else 'sub'}",
-            "action_id": "toggle_subscription",
-            "style": btn_style
-        }
-
     # 1. Create the Main Block
     main_block = {
         "type": "section",
-        "text": text_section,
-        "accessory": accessory
+        "text": text_section
     }
+    if is_admin:
+        main_block['accessory'] = accessory # type: ignore
     
     blocks = [main_block]
 
@@ -283,6 +281,8 @@ def get_dashboard_view(user_id):
             "elements": [
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Event"}, "action_id": "open_add_event_modal", "style": "primary"},
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Category"}, "action_id": "open_add_type_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Subscribe Channel"}, "action_id": "open_manage_admins_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Register Channel"}, "action_id": "open_manage_admins_modal"},
                 {"type": "button", "text": {"type": "plain_text", "text": "Manage Admins"}, "action_id": "open_manage_admins_modal"}
             ]
         })
@@ -301,7 +301,7 @@ def get_dashboard_view(user_id):
     for cat in event_types:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"📂 *{cat}*"}})
         
-        events, subs = get_sorted_events(user_id, category=cat)
+        events, subs = get_sorted_events('', category=cat)
         display_events = events[:items_per_cat]
         
         if not display_events:
@@ -328,7 +328,7 @@ def get_category_view(user_id, category, page=0):
     """Detailed view of a single category with pagination."""
     is_admin = is_user_admin(user_id)
     ITEMS_PER_PAGE = 20
-    events, subs = get_sorted_events(user_id, category=category)
+    events, subs = get_sorted_events('', category=category)
     
     total_pages = math.ceil(len(events) / ITEMS_PER_PAGE)
     start = page * ITEMS_PER_PAGE
@@ -406,10 +406,6 @@ def open_edit_event_modal(client, trigger_id, event_id):
 # 4. Bolt Handlers
 # -------------------------
 
-# At the top of your file, make sure you know your App ID
-# You can hardcode it, or get it from env vars.
-APP_ID = os.getenv("SLACK_APP_ID", "A0A6X1SAT1B") # Find this in "Basic Information"
-
 # -------------------------
 # 5. Bolt Handlers (Interactivity)
 # -------------------------
@@ -434,22 +430,22 @@ def handle_list_subs(ack, respond, command):
     user_id = command["user_id"]
     text = command["text"].strip()
     
-    target_id = parse_user_id(text) if text else user_id
+    target_id = parse_channel_id(text) if text else None
     
     # Check permission
     with flask_app.app_context():
-        if target_id != user_id and not is_user_admin(user_id):
-            respond("🚫 다른 유저의 구독 리스트는 관리자만 볼 수 있습니다.")
+        if not is_user_admin(user_id):
+            respond("🚫 관리자만 볼 수 있습니다.")
             return
         
         # Use JOIN to fetch subscriptions and events in one query
-        subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.user_slack_id == target_id).all()
+        subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.channel_id == target_id).all()
         
         if not subs:
-            respond(f"<@{target_id}> 님은 구독 중인 이벤트가 없습니다.")
+            respond(f"<#{target_id}> 님은 구독 중인 이벤트가 없습니다.")
             return
         
-        response = f"*📋 <@{target_id}> 님의 구독 리스트:*\n"
+        response = f"*📋 <#{target_id}> 님의 구독 리스트:*\n"
         for sub, event in subs:
             status = "미등록" if sub.status == 'Pending' else '등록완료'
             if event and event.registration_deadline >= datetime.now().date():
@@ -485,7 +481,7 @@ def handle_check_pending(ack, respond, command):
         # Build List
         msg = f"🚨 *{event.title}* 미등록 학생 리스트 ({len(pending_subs)}명):\n"
         for sub in pending_subs:
-            msg += f"• <@{sub.user_slack_id}>\n"
+            msg += f"• <#{sub.channel_id}>\n"
         
         msg += f"\n✅ 등록 완료: {registered_count}명"
         msg += f"\n👉 `/nudge-pending {event.id}` 를 입력하여 알림을 보낼 수 있습니다."
@@ -521,7 +517,7 @@ def handle_nudge_pending(ack, respond, client, command):
             try:
                 # Send the Nudge DM
                 client.chat_postMessage(
-                    channel=sub.user_slack_id,
+                    channel=sub.channel_id,
                     text=f"👋 안녕하세요! 담당 컨설턴트가 *{event.title}* 등록 여부를 확인 중입니다.",
                     blocks=[
                         {
@@ -544,7 +540,7 @@ def handle_nudge_pending(ack, respond, client, command):
                 )
                 count += 1
             except Exception as e:
-                logger.error(f"Failed to nudge {sub.user_slack_id}: {e}")
+                logger.error(f"Failed to nudge {sub.channel_id}: {e}")
 
         respond(f"📨 *{event.title}*: 미등록 학생 *{count}명*에게 알림을 발송했습니다.")
 
@@ -635,7 +631,7 @@ def handle_track_command(ack, respond, command):
 
         # 2. Logic Router
         if not parts:
-            respond("⚠️ 사용법:\n`/track add @User`\n`/track remove @User`\n`/track list`\n`/track @User` (상세 조회)")
+            respond("⚠️ 사용법:\n`/track add #channel`\n`/track remove #channel`\n`/track list`\n`/track #channel` (상세 조회)")
             return
 
         action = parts[0].lower()
@@ -643,20 +639,20 @@ def handle_track_command(ack, respond, command):
         # --- ACTION: ADD ---
         if action == "add":
             if len(parts) < 2:
-                respond("⚠️ 추가할 유저를 선택해주세요. 예: `/track add @John`")
+                respond("⚠️ 추가할 유저를 선택해주세요. 예: `/track add #John`")
                 return
             
-            target_id = parse_user_id(parts[1])
+            target_id = parse_channel_id(parts[1])
             if not target_id:
                 respond("⚠️ 유효한 유저 태그가 아닙니다.")
                 return
 
-            if not TrackedStudent.query.filter_by(consultant_id=admin_id, student_id=target_id).first():
-                db.session.add(TrackedStudent(consultant_id=admin_id, student_id=target_id))
+            if not TrackedStudent.query.filter_by(consultant_id=admin_id, channel_id=target_id).first():
+                db.session.add(TrackedStudent(consultant_id=admin_id, channel_id=target_id))
                 db.session.commit()
-                respond(f"✅ 이제 <@{target_id}> 학생을 추적 관리합니다.")
+                respond(f"✅ 이제 <#{target_id}> 학생을 추적 관리합니다.")
             else:
-                respond(f"ℹ️ <@{target_id}> 학생은 이미 추적 목록에 있습니다.")
+                respond(f"ℹ️ <#{target_id}> 학생은 이미 추적 목록에 있습니다.")
 
         # --- ACTION: REMOVE ---
         elif action == "remove":
@@ -664,14 +660,14 @@ def handle_track_command(ack, respond, command):
                 respond("⚠️ 삭제할 유저를 선택해주세요.")
                 return
             
-            target_id = parse_user_id(parts[1])
+            target_id = parse_channel_id(parts[1])
             if not target_id: return
 
-            entry = TrackedStudent.query.filter_by(consultant_id=admin_id, student_id=target_id).first()
+            entry = TrackedStudent.query.filter_by(consultant_id=admin_id, channel_id=target_id).first()
             if entry:
                 db.session.delete(entry)
                 db.session.commit()
-                respond(f"🗑️ <@{target_id}> 학생을 추적 목록에서 제거했습니다.")
+                respond(f"🗑️ <#{target_id}> 학생을 추적 목록에서 제거했습니다.")
             else:
                 respond(f"⚠️ 목록에 없는 학생입니다.")
 
@@ -684,31 +680,31 @@ def handle_track_command(ack, respond, command):
             
             msg = "*📋 내 담당 학생 리스트 (My Roster):*\n"
             for t in tracked:
-                msg += f"• <@{t.student_id}>\n"
+                msg += f"• <#{t.student_id}>\n"
             respond(msg)
 
         # --- ACTION: VIEW DETAILS (Default) ---
-        # If input is just "@User" or "show @User"
+        # If input is just "#User" or "show #User"
         else:
-            # Handle "/track @User" case
-            target_id = parse_user_id(action) 
-            # Handle "/track show @User" case (optional safety)
+            # Handle "/track #User" case
+            target_id = parse_channel_id(action) 
+            # Handle "/track show #User" case (optional safety)
             if not target_id and len(parts) > 1:
-                target_id = parse_user_id(parts[1])
+                target_id = parse_channel_id(parts[1])
 
             if not target_id:
                 respond("⚠️ 알 수 없는 명령어입니다.")
                 return
 
             # Fetch Student Details
-            subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.user_slack_id == target_id).order_by(Event.event_date).all()
+            subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.channel_id == target_id).order_by(Event.event_date).all()
             
             if not subs:
-                respond(f"📂 <@{target_id}> 학생은 현재 구독 중인 이벤트가 없습니다.")
+                respond(f"📂 <#{target_id}> 학생은 현재 구독 중인 이벤트가 없습니다.")
                 return
 
             # Build Report
-            response_text = f"*👤 학생 분석 보고서: <@{target_id}>*\n\n"
+            response_text = f"*👤 학생 분석 보고서: <#{target_id}>*\n\n"
             
             today = datetime.now().date()
             
@@ -769,9 +765,16 @@ def open_admin_sub_modal(ack, body, client, command):
                     "block_id": "target_user",
                     "label": {"type": "plain_text", "text": "유저 선택"},
                     "element": {
-                        "type": "users_select",
-                        "action_id": "user_select",
-                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"}
+                        "type": "conversations_select",
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "filter": {
+                            "include": [
+                                "public",
+                                "private"
+                            ],
+                            "exclude_bot_users": True
+                        }
                     }
                 },
                 # Input 2: Action Type (Single Event or Category?)
@@ -820,64 +823,100 @@ def open_admin_sub_modal(ack, body, client, command):
         }
     )
 
+@bolt_app.command("/admin-register")
+def open_admin_register_modal(ack, body, client, command):
+    ack()
+    user_id = command["user_id"]
+    channel_id = body['channel_id']
+    # 1. Fetch upcoming events for the dropdown
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+
+    # 2. Open the Modal
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_register",
+            "private_metadata": channel_id,
+            "title": {"type": "plain_text", "text": "등록"},
+            "submit": {"type": "plain_text", "text": "유저 등록하기"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                },
+                # Input 1: User Picker
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "element": {
+                        "type": "conversations_select",
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "filter": {
+                            "include": [
+                                "public",
+                                "private"
+                            ],
+                            "exclude_bot_users": True
+                        }
+                    }
+                },
+                # Input 2: Action Type (Single Event or Category?)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "모드"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
+                },
+                # Input 3: Event Picker (Searchable Dropdown)
+                # Note: This is optional because "All" doesn't need it.
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_subscribed",
+                        "placeholder": {"type": "plain_text", "text": "이벤트 선택"},
+                        "min_query_length": 0  # <--- Change this to 0 to auto-load on click
+                    }
+                },
+                # Input 4: Category Picker (Only needed if Mode is Category)
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
 # Helper for category options
 def get_category_options():
     with flask_app.app_context():
         cats = EventType.query.all()
         return [{"text": {"type": "plain_text", "text": c.name}, "value": c.name} for c in cats]
-
-@bolt_app.event("team_join")
-def welcome_new_user(event, client, logger):
-    """
-    Triggered when a new user joins the workspace.
-    Sends a welcome DM with a Deep Link to the App Home.
-    """
-    try:
-        user_id = event["user"]["id"]
-        team_id = event["user"]["team_id"]
-        
-        # Construct the Deep Link
-        # This forces Slack to open YOUR App's Home Tab
-        app_home_link = f"slack://app?team={team_id}&id={APP_ID}&tab=home"
-        
-        # Send the DM
-        client.chat_postMessage(
-            channel=user_id,
-            text="Welcome! Click the button to see upcoming events.", # Fallback text
-            blocks=[
-                {
-                    "type": "header",
-                    "text": {"type": "plain_text", "text": "👋 환영합니다!"}
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            "헤스티아 알리미 앱에 오신 것을 환영합니다.\n"
-                            "아래 버튼을 눌러 *홈 탭*으로 이동하면,\n"
-                            "시험 및 행사 일정을 확인하고 구독할 수 있습니다."
-                        )
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "🚀 앱 홈으로 이동"},
-                            "style": "primary",
-                            "url": app_home_link, # <--- The Deep Link goes here
-                            "action_id": "link_to_home" 
-                        }
-                    ]
-                }
-            ]
-        )
-        logger.info(f"Sent onboarding DM to {user_id}")
-
-    except Exception as e:
-        logger.error(f"Failed to onboard user: {e}")
 
 # --- Navigation & Home ---
 @bolt_app.event("app_home_opened")
@@ -973,7 +1012,7 @@ def handle_registration_confirm(ack, body, client):
     event_id = int(body["actions"][0]["value"])
     
     with flask_app.app_context():
-        sub = Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first()
+        sub = Subscription.query.filter_by(channel_id=user_id, event_id=event_id).first()
         if sub and sub.status == "Pending":
             sub.status = "Registered"
             
@@ -997,7 +1036,7 @@ def handle_registration_confirm(ack, body, client):
                 event = Event.query.get(event_id)
                 client.chat_postMessage(
                     channel=config.value,
-                    text=f"🎉 *등록 확인:* <@{user_id}> 님이 *{event.title}* 등록을 완료했습니다!"
+                    text=f"🎉 *등록 확인:* <#{user_id}> 님이 *{event.title}* 등록을 완료했습니다!"
                 )
             
             db.session.commit()
@@ -1060,7 +1099,7 @@ def handle_admin_sub_submission(ack, body, view, client):
     
     # 1. Extract Data
     values = view["state"]["values"]
-    target_user = values["target_user"]["user_select"]["selected_user"]
+    target_user = values["target_user"]["conversation_select"]["selected_conversation"]
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
     # Context info
@@ -1082,11 +1121,11 @@ def handle_admin_sub_submission(ack, body, view, client):
             event = Event.query.get(event_id)
             
             # Subscribe
-            if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event_id).first():
-                db.session.add(Subscription(user_slack_id=target_user, event_id=event_id, status='Pending'))
-                msg = f"✅ <@{target_user}> 님을 *{event.title}*에 구독시켰습니다."
+            if not Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first():
+                db.session.add(Subscription(channel_id=target_user, event_id=event_id, status='Pending'))
+                msg = f"✅ <#{target_user}> 님을 *{event.title}*에 구독시켰습니다."
             else:
-                msg = f"ℹ️ <@{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
+                msg = f"ℹ️ <#{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
 
         # --- MODE 2: CATEGORY ---
         elif mode == "cat":
@@ -1100,20 +1139,84 @@ def handle_admin_sub_submission(ack, body, view, client):
             
             count = 0
             for event in cat_events:
-                if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id, status='Pending'))
+                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
-            msg = f"✅ <@{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
+            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
 
         # --- MODE 3: ALL ---
         elif mode == "all":
             all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
             count = 0
             for event in all_events:
-                if not Subscription.query.filter_by(user_slack_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(user_slack_id=target_user, event_id=event.id, status='Pending'))
+                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
-            msg = f"✅ <@{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
+            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
+
+        db.session.commit()
+    
+    # Notify Admin of success
+    client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
+
+@bolt_app.view("submit_admin_register")
+def handle_admin_register_submission(ack, body, view, client):
+    ack()
+    
+    # 1. Extract Data
+    values = view["state"]["values"]
+    target_user = values["target_user"]["conversation_select"]["selected_conversation"]
+    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
+    
+    # Context info
+    admin_id = body["user"]["id"]
+    channel_id = view["private_metadata"]
+    msg = ""
+
+    with flask_app.app_context():
+        
+        # --- MODE 1: SINGLE ITEM ---
+        if mode == "item":
+            selected_option = values["event_select"]["event_id"]["selected_option"]
+            if not selected_option or selected_option["value"] == "none":
+                # Send error message to Admin
+                client.chat_postMessage(channel=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                return
+
+            event_id = int(selected_option["value"])
+            event = Event.query.get(event_id)
+            sub = Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first()
+            if sub:
+                sub.status = 'Registered'
+                db.session.commit()
+            msg = f"✅ <#{target_user}> 님을 *{event.title}*에 등록시켰습니다."
+
+        # --- MODE 2: CATEGORY ---
+        elif mode == "cat":
+            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+            if not selected_cat:
+                client.chat_postMessage(channel=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                return
+            
+            cat_name = selected_cat["value"]
+            cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
+            
+            count = 0
+            for event in cat_events:
+                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
+                    count += 1
+            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 등록시켰습니다."
+
+        # --- MODE 3: ALL ---
+        elif mode == "all":
+            all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
+            count = 0
+            for event in all_events:
+                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
+                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
+                    count += 1
+            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 등록시켰습니다."
 
         db.session.commit()
     
@@ -1152,7 +1255,7 @@ def handle_send_message_submission(ack, body, view, client):
         for sub in subs:
             try:
                 client.chat_postMessage(
-                    channel=sub.user_slack_id,
+                    channel=sub.channel_id,
                     text=message_text,
                     blocks=[
                         {
@@ -1163,7 +1266,7 @@ def handle_send_message_submission(ack, body, view, client):
                 )
                 count += 1
             except Exception as e:
-                logger.error(f"Failed to send message to {sub.user_slack_id}: {e}")
+                logger.error(f"Failed to send message to {sub.channel_id}: {e}")
         
         client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"📨 *{event.title}*: {count}명에게 메시지를 발송했습니다.")
 
@@ -1179,10 +1282,10 @@ def handle_toggle(ack, body, client):
     
     with flask_app.app_context():
         if action == "sub":
-            if not Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first():
-                db.session.add(Subscription(user_slack_id=user_id, event_id=event_id, status='Pending'))
+            if not Subscription.query.filter_by(channel_id=user_id, event_id=event_id).first():
+                db.session.add(Subscription(channel_id=user_id, event_id=event_id, status='Pending'))
         else:
-            Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).delete()
+            Subscription.query.filter_by(channel_id=user_id, event_id=event_id).delete()
         db.session.commit()
         
         # Refresh View
@@ -1210,8 +1313,8 @@ def handle_event_overflow(ack, body, client):
     elif action in ["sub", "unsub"]:
         with flask_app.app_context():
             if action == "sub":
-                if not Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).first():
-                    db.session.add(Subscription(user_slack_id=user_id, event_id=event_id, status='Pending'))
+                if not Subscription.query.filter_by(channel_id=user_id, event_id=event_id).first():
+                    db.session.add(Subscription(channel_id=user_id, event_id=event_id, status='Pending'))
             else:
                 Subscription.query.filter_by(user_slack_id=user_id, event_id=event_id).delete()
             db.session.commit()
@@ -1221,8 +1324,6 @@ def handle_event_overflow(ack, body, client):
 def handle_event_search(ack, body):
     """Dynamically load events based on user search query."""
     search_value = body.get("value", "").lower()
-    
-    logger.info(f"🔍 Search value: '{search_value}'")
     
     with flask_app.app_context():
         # Search events by title
@@ -1272,6 +1373,54 @@ def handle_admin_event_search(ack, body):
             options.append({
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
+            })
+    
+    ack(options=options)
+
+@bolt_app.options("event_subscribed")
+def handle_admin_event_subscribed_search(ack, body):
+    """Dynamically load events for admin subscription modal."""
+    
+    # 1. FIX: Extract private_metadata correctly from the view payload
+    # Note: private_metadata is only available if this input is inside a Modal.
+    try:
+        channel_id = body.get('view', {}).get('private_metadata')
+        if not channel_id:
+            # Fallback or error handling if metadata is missing
+            ack(options=[])
+            return
+    except KeyError:
+        ack(options=[])
+        return
+
+    with flask_app.app_context():
+        # 2. Query returns a list of tuples: [(Subscription, Event), (Subscription, Event)...]
+        results = db.session.query(Subscription, Event)\
+            .join(Event)\
+            .filter(
+                Subscription.channel_id == channel_id, 
+                Subscription.status == 'Pending'
+            ).all()
+
+        options = []
+        
+        # 3. FIX: Unpack the tuple (sub, event)
+        for sub, event in results:
+            date_str = event.event_date.strftime('%Y-%m-%d')
+            safe_title = event.title
+            
+            # Formatting logic (User's original logic preserved)
+            occupied_len = len(date_str) + 5
+            max_title_len = 75 - occupied_len
+            
+            if len(safe_title) > max_title_len:
+                safe_title = safe_title[:max(0, max_title_len - 3)] + "..."
+            
+            label_text = f"{safe_title} ({date_str})"
+            
+            options.append({
+                "text": {"type": "plain_text", "text": label_text},
+                "value": str(event.id) # Ensure value is the Event ID (or Subscription ID based on your need)
             })
     
     ack(options=options)
@@ -1416,7 +1565,7 @@ def generate_morning_briefing(today):
             
             if pending_subs:
                 urgent_found = True
-                names = [f"<@{s.user_slack_id}>" for s in pending_subs]
+                names = [f"<#{s.channel_id}>" for s in pending_subs]
                 student_list = ", ".join(names)
                 
                 blocks.append({
