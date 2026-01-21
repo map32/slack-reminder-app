@@ -1265,7 +1265,7 @@ def handle_admin_sub_submission(ack, body, view, client):
     
     # 1. Extract Data
     values = view["state"]["values"]
-    target_user = values["target_user"]["conversation_select"]["selected_conversation"]
+    target_user = values["target_user"]["conversations_select"]["selected_conversation"]
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
     # Context info
@@ -1331,7 +1331,7 @@ def handle_admin_register_submission(ack, body, view, client):
     
     # 1. Extract Data
     values = view["state"]["values"]
-    target_user = values["target_user"]["conversation_select"]["selected_conversation"]
+    target_user = values["target_user"]["conversations_select"]["selected_conversation"]
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
     # Context info
