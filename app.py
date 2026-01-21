@@ -281,8 +281,8 @@ def get_dashboard_view(user_id):
             "elements": [
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Event"}, "action_id": "open_add_event_modal", "style": "primary"},
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Category"}, "action_id": "open_add_type_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Subscribe Channel"}, "action_id": "open_manage_admins_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Register Channel"}, "action_id": "open_manage_admins_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Subscribe Channel"}, "action_id": "open_admin_sub_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Register Channel"}, "action_id": "open_admin_register_modal"},
                 {"type": "button", "text": {"type": "plain_text", "text": "Manage Admins"}, "action_id": "open_manage_admins_modal"}
             ]
         })
@@ -1005,6 +1005,172 @@ def open_admin_modal(ack, body, client):
         }
     )
 
+@bolt_app.action("open_admin_register_modal")
+def open_admin_register_modal_(ack, body, client):
+    ack()
+    user_id = body['user']['id']
+    # 2. Open the Modal
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_register",
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "등록"},
+            "submit": {"type": "plain_text", "text": "유저 등록하기"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                },
+                # Input 1: User Picker
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "element": {
+                        "type": "conversations_select",
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "filter": {
+                            "include": [
+                                "public",
+                                "private"
+                            ],
+                            "exclude_bot_users": True
+                        }
+                    }
+                },
+                # Input 2: Action Type (Single Event or Category?)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "모드"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
+                },
+                # Input 3: Event Picker (Searchable Dropdown)
+                # Note: This is optional because "All" doesn't need it.
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_subscribed",
+                        "placeholder": {"type": "plain_text", "text": "이벤트 선택"},
+                        "min_query_length": 0  # <--- Change this to 0 to auto-load on click
+                    }
+                },
+                # Input 4: Category Picker (Only needed if Mode is Category)
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
+@bolt_app.action("open_admin_sub_modal")
+def open_admin_sub_modal_(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+
+    # 2. Open the Modal
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_sub",
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "구독"},
+            "submit": {"type": "plain_text", "text": "유저 구독하기"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                },
+                # Input 1: User Picker
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "element": {
+                        "type": "conversations_select",
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "filter": {
+                            "include": [
+                                "public",
+                                "private"
+                            ],
+                            "exclude_bot_users": True
+                        }
+                    }
+                },
+                # Input 2: Action Type (Single Event or Category?)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "모드"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
+                },
+                # Input 3: Event Picker (Searchable Dropdown)
+                # Note: This is optional because "All" doesn't need it.
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True, 
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_id",
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
+                    }
+                },
+                # Input 4: Category Picker (Only needed if Mode is Category)
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
+
 @bolt_app.action("confirm_registration")
 def handle_registration_confirm(ack, body, client):
     ack()
@@ -1374,7 +1540,7 @@ def handle_admin_event_search(ack, body):
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
             })
-    
+    print(options)
     ack(options=options)
 
 @bolt_app.options("event_subscribed")
