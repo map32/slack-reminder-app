@@ -1513,7 +1513,6 @@ def handle_event_search(ack, body):
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
             })
-    print(options)
     ack(options=options)
 
 @bolt_app.options("event_id")
@@ -1541,7 +1540,6 @@ def handle_admin_event_search(ack, body):
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(e.id)
             })
-    print(options)
     ack(options=options)
 
 @bolt_app.options("event_subscribed")
