@@ -532,6 +532,7 @@ def handle_nudge_pending(ack, respond, client, command):
                                     "text": {"type": "plain_text", "text": "✅ 등록 완료"},
                                     "style": "primary",
                                     "value": str(event.id),
+                                    "private_metadata": sub.channel_id,
                                     "action_id": "confirm_registration"
                                 }
                             ]
@@ -1198,8 +1199,12 @@ def handle_registration_confirm(ack, body, client):
 
             # 2. 🆕 SUCCESS FEED: Notify Consultants
             config = AppConfig.query.get("consultant_channel")
+            event = Event.query.get(event_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"🎉 *{event.title}* 등록을 완료했습니다!"
+            )
             if config:
-                event = Event.query.get(event_id)
                 client.chat_postMessage(
                     channel=config.value,
                     text=f"🎉 *등록 확인:* <#{user_id}> 님이 *{event.title}* 등록을 완료했습니다!"
@@ -1324,6 +1329,7 @@ def handle_admin_sub_submission(ack, body, view, client):
     
     # Notify Admin of success
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
+    client.chat_postMessage(channel=target_user, text=msg)
 
 @bolt_app.view("submit_admin_register")
 def handle_admin_register_submission(ack, body, view, client):
@@ -1388,6 +1394,7 @@ def handle_admin_register_submission(ack, body, view, client):
     
     # Notify Admin of success
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
+    client.chat_postMessage(channel=target_user, text=msg)
 
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
