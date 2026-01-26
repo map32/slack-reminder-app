@@ -1556,7 +1556,7 @@ def handle_admin_event_subscribed_search(ack, body):
     # 1. FIX: Extract private_metadata correctly from the view payload
     # Note: private_metadata is only available if this input is inside a Modal.
     try:
-        channel_id = body.get('view', {}).get('private_metadata')
+        channel_id = body["target_user"]["conversations_select"]["selected_conversation"]
         if not channel_id:
             # Fallback or error handling if metadata is missing
             ack(options=[])
