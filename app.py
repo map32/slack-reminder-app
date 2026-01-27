@@ -533,7 +533,6 @@ def handle_nudge_pending(ack, respond, client, command):
                                     "text": {"type": "plain_text", "text": "✅ 등록 완료"},
                                     "style": "primary",
                                     "value": str(event.id),
-                                    "private_metadata": sub.channel_id,
                                     "action_id": "confirm_registration"
                                 }
                             ]
@@ -616,6 +615,67 @@ def open_send_message_modal(ack, body, client):
             ]
         }
     )
+
+@bolt_app.view("submit_send_event_message")
+def handle_send_message_submission(ack, body, view, client):
+    # 1. Ack immediately to tell Slack we received the submission
+    ack()
+    
+    values = view["state"]["values"]
+    admin_id = body["user"]["id"]
+    channel_id = view["private_metadata"]
+    
+    # Correct Keys based on your modal: event_select -> event_search
+    selected_event = values.get("event_select", {}).get("event_search", {}).get("selected_option")
+    message_text = values.get("message", {}).get("msg_text", {}).get("value")
+    
+    # Validation
+    if not selected_event or selected_event["value"] == "none":
+        client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+        return
+    if not message_text:
+        client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 메시지 내용을 입력해주세요.")
+        return
+    
+    event_id = int(selected_event["value"])
+    
+    try:
+        with flask_app.app_context():
+            event = Event.query.get(event_id)
+            if not event:
+                client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 찾을 수 없습니다.")
+                return
+            
+            # Fetch subscribers
+            subs = Subscription.query.filter_by(event_id=event_id).all()
+            
+            if not subs:
+                client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"ℹ️ *{event.title}*: 구독한 채널이 없습니다.")
+                return
+            
+            count = 0
+            for sub in subs:
+                try:
+                    client.chat_postMessage(
+                        channel=sub.channel_id,
+                        text=message_text,
+                        blocks=[
+                            {
+                                "type": "section",
+                                "text": {"type": "mrkdwn", "text": f"📢 *{event.title}* 관련 공지\n\n{message_text}"}
+                            }
+                        ]
+                    )
+                    count += 1
+                except Exception as e:
+                    print(f"Failed to send message to {sub.channel_id}: {e}")
+            
+            # Final success message to Admin
+            client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"📨 *{event.title}*: {count}개 채널에 메시지를 발송했습니다.")
+
+    except Exception as e:
+        print(f"Submission Error: {e}")
+        client.chat_postMessage(channel=admin_id, text=f"❌ 발송 중 오류 발생: {str(e)}")
 
 @bolt_app.command("/track")
 def handle_track_command(ack, respond, command):
@@ -1471,53 +1531,6 @@ def handle_admin_register_submission(ack, body, view, client):
     except Exception as e:
         print(f"CRITICAL ERROR in submission: {e}")
         client.chat_postMessage(channel=admin_id, text=f"❌ DB 등록 오류: {str(e)}")
-
-@bolt_app.view("submit_send_event_message")
-def handle_send_message_submission(ack, body, view, client):
-    ack()
-    values = view["state"]["values"]
-    selected_event = values["event_select"]["event_id"]["selected_option"]
-    message_text = values["message"]["msg_text"]["value"]
-    admin_id = body["user"]["id"]
-    channel_id = view["private_metadata"]
-    
-    if not selected_event or selected_event["value"] == "none":
-        client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
-        return
-    
-    event_id = int(selected_event["value"])
-    
-    with flask_app.app_context():
-        event = Event.query.get(event_id)
-        if not event:
-            client.chat_postEphemeral(channel=channel_id, user=admin_id, text="⚠️ 이벤트를 찾을 수 없습니다.")
-            return
-        
-        # Get all subscriptions for this event
-        subs = Subscription.query.filter_by(event_id=event_id).all()
-        
-        if not subs:
-            client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"ℹ️ *{event.title}*: 구독한 학생이 없습니다.")
-            return
-        
-        count = 0
-        for sub in subs:
-            try:
-                client.chat_postMessage(
-                    channel=sub.channel_id,
-                    text=message_text,
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": message_text}
-                        }
-                    ]
-                )
-                count += 1
-            except Exception as e:
-                logger.error(f"Failed to send message to {sub.channel_id}: {e}")
-        
-        client.chat_postEphemeral(channel=channel_id, user=admin_id, text=f"📨 *{event.title}*: {count}명에게 메시지를 발송했습니다.")
 
 # --- Interactive Actions ---
 
