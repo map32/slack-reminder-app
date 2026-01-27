@@ -1358,12 +1358,13 @@ def handle_admin_sub_submission(ack, body, view, client):
             event_names = [e.title for e in all_events]
             target_msg = f"✅ <#{target_user}> 님이 *모든 이벤트*에 구독되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
         config = AppConfig.query.get("consultant_channel")
+        config_id = config.value if config else None
         db.session.commit()
     
     # Notify Admin of success
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
-    if config and config.value:
-        client.chat_postMessage(channel=config.value, text=target_msg)
+    if config_id:
+        client.chat_postMessage(channel=config_id, text=target_msg)
     if to_send_target is True:
         client.chat_postMessage(channel=target_user, text=target_msg)
 
@@ -1448,12 +1449,13 @@ def handle_admin_register_submission(ack, body, view, client):
                 msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 등록되었습니다."
                 event_names = [e.title for e in all_events]
                 target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+            config = AppConfig.query.get("consultant_channel")
+            config_id = config.value if config else None
 
         # 2. Notify the Admin (Ephemeral in the original channel)
         client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
-        config = AppConfig.query.get("consultant_channel")
-        if config and config.value:
-            client.chat_postMessage(channel=config.value, text=target_msg)
+        if config_id:
+            client.chat_postMessage(channel=config_id, text=target_msg)
         # 3. Notify the Target Channel (Public message)
         # Using chat_postMessage ensures the channel sees the update.
         if to_send_target is True:
