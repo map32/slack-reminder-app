@@ -858,7 +858,6 @@ def open_admin_register_modal(ack, body, client, command):
                     "accessory": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
                         "filter": {
                             "include": ["public", "private"],
@@ -1052,7 +1051,6 @@ def open_admin_register_modal_(ack, body, client):
                     "accessory": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
                         "filter": {
                             "include": ["public", "private"],
