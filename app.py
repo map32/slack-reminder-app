@@ -1032,6 +1032,7 @@ def open_admin_register_modal_(ack, body, client):
                     "element": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
+                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
                         "filter": {
                             "include": [
@@ -1115,6 +1116,7 @@ def open_admin_sub_modal_(ack, body, client):
                     "element": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
+                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
                         "filter": {
                             "include": [
@@ -1553,12 +1555,18 @@ def handle_admin_event_search(ack, body):
 def handle_admin_event_subscribed_search(ack, body):
     """Dynamically load events for admin subscription modal."""
     
-    # 1. FIX: Extract channel_id from the view state
-    # Note: In an options handler, the view state is nested under body["view"]["state"]["values"]
+    # 1. Extract channel_id from the view state
+    # Note: The user may not have filled in target_user yet, so check if it exists first
     try:
-        channel_id = body["view"]["state"]["values"]["target_user"]["conversations_select"]["selected_conversation"]
+        view_values = body["view"]["state"]["values"]
+        
+        # Check if target_user has been filled in yet
+        if "target_user" not in view_values:
+            ack(options=[])
+            return
+        
+        channel_id = view_values["target_user"]["conversations_select"].get("selected_conversation")
         if not channel_id:
-            # Fallback or error handling if metadata is missing
             ack(options=[])
             return
     except KeyError as e:
