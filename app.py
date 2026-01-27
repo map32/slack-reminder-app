@@ -1258,39 +1258,59 @@ def open_admin_sub_modal_(ack, body, client):
 @bolt_app.action("confirm_registration")
 def handle_registration_confirm(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
+    
+    # 1. FIX: Get the CHANNEL ID, not the USER ID
+    # Since the subscription is tied to the channel
+    target_channel_id = body["channel"]["id"]
     event_id = int(body["actions"][0]["value"])
     
     with flask_app.app_context():
-        sub = Subscription.query.filter_by(channel_id=user_id, event_id=event_id).first()
-        if sub and sub.status == "Pending":
+        # Look up by channel_id
+        sub = Subscription.query.filter_by(channel_id=target_channel_id, event_id=event_id).first()
+        
+        # DEBUG: Print to logs if not found
+        if not sub:
+            print(f"DEBUG: No sub found for channel {target_channel_id} and event {event_id}")
+            return
+
+        if sub.status == "Pending":
             sub.status = "Registered"
             
-            # Check if message exists (it may not in all contexts)
-            if body.get('message') and body['message'].get('text'):
-                # 1. Update Student's Button (UI Refresh)
-                original_text = body["message"]["text"]
+            # Fetch event details
+            event = Event.query.get(event_id)
+            
+            # 2. Update UI: Remove the button so they can't click it again
+            # We pull the text from the first block if it exists
+            try:
+                blocks = body.get("message", {}).get("blocks", [])
+                original_text = blocks[0]["text"]["text"] if blocks else "알림 메시지"
+                
                 client.chat_update(
-                    channel=body["channel"]["id"],
+                    channel=target_channel_id,
                     ts=body["message"]["ts"],
-                    text=original_text,
+                    text="✅ 등록 확인 완료",
                     blocks=[
                         {"type": "section", "text": {"type": "mrkdwn", "text": original_text}},
                         {"type": "context", "elements": [{"type": "mrkdwn", "text": "✅ *등록 확인 완료*"}]}
                     ]
                 )
+            except Exception as e:
+                print(f"UI Update Error: {e}")
 
-            # 2. 🆕 SUCCESS FEED: Notify Consultants
+            # 3. SUCCESS FEED
             config = AppConfig.query.get("consultant_channel")
-            event = Event.query.get(event_id)
+            
+            # Notify the channel where the button was clicked
             client.chat_postMessage(
-                channel=user_id,
+                channel=target_channel_id,
                 text=f"🎉 *{event.title}* 등록을 완료했습니다!"
             )
+            
+            # Notify the Consultants
             if config:
                 client.chat_postMessage(
                     channel=config.value,
-                    text=f"🎉 *등록 확인:* <#{user_id}> 님이 *{event.title}* 등록을 완료했습니다!"
+                    text=f"🎉 *등록 확인:* <#{target_channel_id}> 채널이 *{event.title}* 등록을 완료했습니다!"
                 )
             
             db.session.commit()
