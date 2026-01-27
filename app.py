@@ -1557,6 +1557,7 @@ def handle_admin_event_subscribed_search(ack, body):
     # Note: private_metadata is only available if this input is inside a Modal.
     try:
         channel_id = body["target_user"]["conversations_select"]["selected_conversation"]
+        print(channel_id)
         if not channel_id:
             # Fallback or error handling if metadata is missing
             ack(options=[])
@@ -1594,7 +1595,6 @@ def handle_admin_event_subscribed_search(ack, body):
                 "text": {"type": "plain_text", "text": label_text},
                 "value": str(event.id) # Ensure value is the Event ID (or Subscription ID based on your need)
             })
-    
     ack(options=options)
 
 # -------------------------
