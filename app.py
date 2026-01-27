@@ -1379,6 +1379,9 @@ def handle_admin_register_submission(ack, body, view, client):
     
     # target_id is the Channel ID selected in the dropdown
     target_id = values["target_user"]["conversations_select"]["selected_conversation"]
+    # Make explicit copy to prevent any variable mutation
+    channel_to_notify = str(target_id) if target_id else None
+    
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
     # admin_id is the person performing the action
@@ -1454,6 +1457,7 @@ def handle_admin_register_submission(ack, body, view, client):
                 to_send_target = True
             config = AppConfig.query.get("consultant_channel")
             config_id = config.value if config else None
+            targ = target_id
 
         # 2. Notify the Admin (Ephemeral in the original channel)
         client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
@@ -1462,7 +1466,7 @@ def handle_admin_register_submission(ack, body, view, client):
         if to_send_target is True:
             if config_id:
                 client.chat_postMessage(channel=config_id, text=target_msg)
-            client.chat_postMessage(channel=target_id, text=target_msg)
+            client.chat_postMessage(channel=channel_to_notify, text=target_msg)
 
     except Exception as e:
         print(f"CRITICAL ERROR in submission: {e}")
