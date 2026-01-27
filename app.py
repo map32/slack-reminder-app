@@ -1568,7 +1568,7 @@ def handle_admin_event_subscribed_search(ack, body):
     with flask_app.app_context():
         # 2. Query returns a list of tuples: [(Subscription, Event), (Subscription, Event)...]
         results = db.session.query(Subscription, Event)\
-            .join(Event)\
+            .join(Event, Subscription.event_id == Event.id)\
             .filter(
                 Subscription.channel_id == channel_id, 
                 Subscription.status == 'Pending'
