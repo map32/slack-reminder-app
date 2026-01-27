@@ -1354,70 +1354,92 @@ def handle_admin_sub_submission(ack, body, view, client):
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
     client.chat_postMessage(channel=target_user, text=msg)
 
+from datetime import datetime
+
 @bolt_app.view("submit_admin_register")
 def handle_admin_register_submission(ack, body, view, client):
     ack()
     
-    # 1. Extract Data
+    # 1. Extraction
     values = view["state"]["values"]
-    target_user = view["state"]["values"]["target_user"]["conversations_select"]["selected_conversation"]
+    
+    # target_id is the Channel ID selected in the dropdown
+    target_id = values["target_user"]["conversations_select"]["selected_conversation"]
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
-    # Context info
+    # admin_id is the person performing the action
     admin_id = body["user"]["id"]
-    channel_id = view["private_metadata"]
-    msg = ""
+    # context_channel is where the /admin-register command was originally typed
+    context_channel = view["private_metadata"] 
 
-    with flask_app.app_context():
-        
-        # --- MODE 1: SINGLE ITEM ---
-        if mode == "item":
-            selected_option = values["event_select"]["event_id"]["selected_option"]
-            if not selected_option or selected_option["value"] == "none":
-                # Send error message to Admin
-                client.chat_postMessage(channel=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
-                return
+    try:
+        with flask_app.app_context():
+            msg = ""
+            
+            # --- MODE 1: SINGLE ITEM ---
+            if mode == "item":
+                # Matches your external_select action_id
+                block_data = values.get("event_select", {}).get("event_subscribed", {})
+                selected_option = block_data.get("selected_option")
+                
+                if not selected_option or selected_option["value"] == "none":
+                    client.chat_postEphemeral(channel=context_channel, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                    return
 
-            event_id = int(selected_option["value"])
-            event = Event.query.get(event_id)
-            sub = Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first()
-            if sub:
-                sub.status = 'Registered'
+                event_id = int(selected_option["value"])
+                event = Event.query.get(event_id)
+                
+                # Check for existing subscription for this CHANNEL
+                sub = Subscription.query.filter_by(channel_id=target_id, event_id=event_id).first()
+                if sub:
+                    sub.status = 'Registered' # Upgrade Pending to Registered
+                else:
+                    db.session.add(Subscription(channel_id=target_id, event_id=event_id, status='Registered'))
+                
                 db.session.commit()
-            msg = f"✅ <#{target_user}> 님을 *{event.title}*에 등록시켰습니다."
+                msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 등록되었습니다."
 
-        # --- MODE 2: CATEGORY ---
-        elif mode == "cat":
-            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
-            if not selected_cat:
-                client.chat_postMessage(channel=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
-                return
-            
-            cat_name = selected_cat["value"]
-            cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
-            
-            count = 0
-            for event in cat_events:
-                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
-                    count += 1
-            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 등록시켰습니다."
+            # --- MODE 2: CATEGORY ---
+            elif mode == "cat":
+                selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+                if not selected_cat:
+                    client.chat_postEphemeral(channel=context_channel, user=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                    return
+                
+                cat_name = selected_cat["value"]
+                cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
+                
+                count = 0
+                for event in cat_events:
+                    if not Subscription.query.filter_by(channel_id=target_id, event_id=event.id).first():
+                        db.session.add(Subscription(channel_id=target_id, event_id=event.id, status='Registered'))
+                        count += 1
+                
+                db.session.commit()
+                msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 등록되었습니다."
 
-        # --- MODE 3: ALL ---
-        elif mode == "all":
-            all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
-            count = 0
-            for event in all_events:
-                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
-                    count += 1
-            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 등록시켰습니다."
+            # --- MODE 3: ALL ---
+            elif mode == "all":
+                all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
+                count = 0
+                for event in all_events:
+                    if not Subscription.query.filter_by(channel_id=target_id, event_id=event.id).first():
+                        db.session.add(Subscription(channel_id=target_id, event_id=event.id, status='Registered'))
+                        count += 1
+                
+                db.session.commit()
+                msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 등록되었습니다."
 
-        db.session.commit()
-    
-    # Notify Admin of success
-    client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
-    client.chat_postMessage(channel=target_user, text=msg)
+        # 2. Notify the Admin (Ephemeral in the original channel)
+        client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
+        
+        # 3. Notify the Target Channel (Public message)
+        # Using chat_postMessage ensures the channel sees the update.
+        client.chat_postMessage(channel=target_id, text=f"📢 관리자에 의해 채널 등록이 업데이트되었습니다:\n{msg}")
+
+    except Exception as e:
+        print(f"CRITICAL ERROR in submission: {e}")
+        client.chat_postMessage(channel=admin_id, text=f"❌ DB 등록 오류: {str(e)}")
 
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
