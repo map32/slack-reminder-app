@@ -3,6 +3,7 @@ import logging
 import re
 import math
 import secrets
+import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -1553,7 +1554,28 @@ def handle_admin_event_search(ack, body):
 
 @bolt_app.options("event_subscribed")
 def handle_admin_event_subscribed_search(ack, body):
-    logger.info("body state: ", body.get("view", {}).get("state", {}))
+    # Use f-string to ensure the dictionary actually prints
+    # Also look at the 'view' top level
+    view_data = body.get("view")
+    
+    if view_data:
+        state = view_data.get("state", {}).get("values", {})
+        print(f"DEBUG: Full State Values: {json.dumps(state, indent=2)}")
+    else:
+        print("DEBUG: No view data found in body")
+
+    # Access the channel_id
+    # Path: state -> block_id -> action_id -> selected_conversation
+    channel_id = (
+        body.get("view", {})
+        .get("state", {})
+        .get("values", {})
+        .get("target_user", {})        # block_id
+        .get("conversations_select", {}) # action_id
+        .get("selected_conversation")    # value
+    )
+
+    print(f"DEBUG: Extracted channel_id: {channel_id}")
     # Safe navigation
     view = body.get("view", {})
     state_values = view.get("state", {}).get("values", {})
