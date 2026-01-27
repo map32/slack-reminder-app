@@ -685,28 +685,27 @@ def handle_track_command(ack, respond, command):
     text = command["text"].strip()
     parts = text.split()
     
-    # 1. Permission Check
+    if not parts:
+        respond("⚠️ 사용법:\n`/track #channel` (조회)\n`/track add #channel` (추가)\n`/track remove #channel` (제거)\n`/track list` (목록)")
+        return
+
     with flask_app.app_context():
         if not is_user_admin(admin_id):
             respond("🚫 관리자 권한이 없습니다.")
             return
 
+        # 1. Try to see if the first word is a channel ID (Direct View)
+        # We don't lowercase it yet because IDs are case-sensitive
+        direct_target = parse_channel_id(parts[0])
+        
         # 2. Logic Router
-        if not parts:
-            respond("⚠️ 사용법:\n`/track add #channel`\n`/track remove #channel`\n`/track list`\n`/track #channel` (상세 조회)")
-            return
-
         action = parts[0].lower()
 
         # --- ACTION: ADD ---
-        if action == "add":
-            if len(parts) < 2:
-                respond("⚠️ 추가할 유저를 선택해주세요. 예: `/track add #John`")
-                return
-            
+        if action == "add" and len(parts) > 1:
             target_id = parse_channel_id(parts[1])
             if not target_id:
-                respond("⚠️ 유효한 유저 태그가 아닙니다.")
+                respond("⚠️ 유효한 채널 태그가 아닙니다.")
                 return
 
             if not TrackedStudent.query.filter_by(consultant_id=admin_id, channel_id=target_id).first():
@@ -714,14 +713,10 @@ def handle_track_command(ack, respond, command):
                 db.session.commit()
                 respond(f"✅ 이제 <#{target_id}> 학생을 추적 관리합니다.")
             else:
-                respond(f"ℹ️ <#{target_id}> 학생은 이미 추적 목록에 있습니다.")
+                respond(f"ℹ️ <#{target_id}> 학생은 이미 목록에 있습니다.")
 
         # --- ACTION: REMOVE ---
-        elif action == "remove":
-            if len(parts) < 2:
-                respond("⚠️ 삭제할 유저를 선택해주세요.")
-                return
-            
+        elif action == "remove" and len(parts) > 1:
             target_id = parse_channel_id(parts[1])
             if not target_id: return
 
@@ -729,9 +724,9 @@ def handle_track_command(ack, respond, command):
             if entry:
                 db.session.delete(entry)
                 db.session.commit()
-                respond(f"🗑️ <#{target_id}> 학생을 추적 목록에서 제거했습니다.")
+                respond(f"🗑️ <#{target_id}> 학생을 목록에서 제거했습니다.")
             else:
-                respond(f"⚠️ 목록에 없는 학생입니다.")
+                respond("⚠️ 목록에 없는 학생입니다.")
 
         # --- ACTION: LIST ---
         elif action == "list":
@@ -740,22 +735,19 @@ def handle_track_command(ack, respond, command):
                 respond("📭 현재 추적 중인 학생이 없습니다.")
                 return
             
-            msg = "*📋 내 담당 학생 리스트 (My Roster):*\n"
+            msg = "*📋 내 담당 학생 리스트:*\n"
             for t in tracked:
-                msg += f"• <#{t.student_id}>\n"
+                # FIX: Ensure this matches your DB column (channel_id)
+                msg += f"• <#{t.channel_id}>\n" 
             respond(msg)
 
-        # --- ACTION: VIEW DETAILS (Default) ---
-        # If input is just "#User" or "show #User"
-        else:
-            # Handle "/track #User" case
-            target_id = parse_channel_id(action) 
-            # Handle "/track show #User" case (optional safety)
-            if not target_id and len(parts) > 1:
-                target_id = parse_channel_id(parts[1])
-
+        # --- ACTION: VIEW DETAILS ---
+        # Triggered by '/track #channel' OR '/track show #channel'
+        elif direct_target or (action == "show" and len(parts) > 1):
+            target_id = direct_target if direct_target else parse_channel_id(parts[1])
+            
             if not target_id:
-                respond("⚠️ 알 수 없는 명령어입니다.")
+                respond("⚠️ 채널을 지정해주세요.")
                 return
 
             # Fetch Student Details
@@ -765,36 +757,29 @@ def handle_track_command(ack, respond, command):
                 respond(f"📂 <#{target_id}> 학생은 현재 구독 중인 이벤트가 없습니다.")
                 return
 
-            # Build Report
             response_text = f"*👤 학생 분석 보고서: <#{target_id}>*\n\n"
-            
             today = datetime.now().date()
-            
             upcoming_txt = ""
             history_txt = ""
             
             for sub, event in subs:
                 status_icon = "✅" if sub.status == "Registered" else "⏳"
                 status_text = "등록 완료" if sub.status == "Registered" else "미등록 (Pending)"
-                
-                line = f"• {status_icon} *{event.title}* | 📅 {event.event_date} | 상태: *{status_text}*\n"
+                line = f"• {status_icon} *{event.title}* | 📅 {event.event_date} | *{status_text}*\n"
                 
                 if event.event_date >= today:
-                    # Highlight urgent deadlines
                     if sub.status == "Pending" and event.registration_deadline <= (today + timedelta(days=3)):
                         line += f"    🚨 *경고: 마감 임박 ({event.registration_deadline})*\n"
                     upcoming_txt += line
                 else:
                     history_txt += line
 
-            if upcoming_txt:
-                response_text += "*📅 예정된 일정 (Upcoming):*\n" + upcoming_txt + "\n"
-            
-            if history_txt:
-                 # Optional: Only show history if requested, or keep it short
-                response_text += "*📜 지난 일정 (History):*\n" + history_txt
-
+            if upcoming_txt: response_text += "*📅 예정된 일정:*\n" + upcoming_txt + "\n"
+            if history_txt: response_text += "*📜 지난 일정:*\n" + history_txt
             respond(response_text)
+            
+        else:
+            respond("⚠️ 알 수 없는 명령어입니다. `/track #channel` 혹은 `/track list`를 사용하세요.")
 
 @bolt_app.command("/admin-sub")
 def open_admin_sub_modal(ack, body, client, command):
