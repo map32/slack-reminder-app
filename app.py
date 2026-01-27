@@ -1300,6 +1300,8 @@ def handle_admin_sub_submission(ack, body, view, client):
     admin_id = body["user"]["id"]
     channel_id = view["private_metadata"]
     msg = ""
+    target_msg = ""
+    to_send_target = False
 
     with flask_app.app_context():
         
@@ -1318,6 +1320,8 @@ def handle_admin_sub_submission(ack, body, view, client):
             if not Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first():
                 db.session.add(Subscription(channel_id=target_user, event_id=event_id, status='Pending'))
                 msg = f"✅ <#{target_user}> 님을 *{event.title}*에 구독시켰습니다."
+                to_send_target = True
+                target_msg = f"✅ <#{target_user}> 님이 *{event.title}* 이벤트에 구독되었습니다."
             else:
                 msg = f"ℹ️ <#{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
 
@@ -1337,6 +1341,9 @@ def handle_admin_sub_submission(ack, body, view, client):
                     db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
             msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
+            to_send_target = True
+            event_names = [e.title for e in cat_events]
+            target_msg = f"✅ <#{target_user}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 구독되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
 
         # --- MODE 3: ALL ---
         elif mode == "all":
@@ -1347,12 +1354,18 @@ def handle_admin_sub_submission(ack, body, view, client):
                     db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
             msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
-
+            to_send_target = True
+            event_names = [e.title for e in all_events]
+            target_msg = f"✅ <#{target_user}> 님이 *모든 이벤트*에 구독되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+        config = AppConfig.query.get("consultant_channel")
         db.session.commit()
     
     # Notify Admin of success
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
-    client.chat_postMessage(channel=target_user, text=msg)
+    if config and config.value:
+        client.chat_postMessage(channel=config.value, text=target_msg)
+    if to_send_target is True:
+        client.chat_postMessage(channel=target_user, text=target_msg)
 
 from datetime import datetime
 
@@ -1371,7 +1384,8 @@ def handle_admin_register_submission(ack, body, view, client):
     admin_id = body["user"]["id"]
     # context_channel is where the /admin-register command was originally typed
     context_channel = view["private_metadata"] 
-
+    to_send_target = False
+    target_msg = ""
     try:
         with flask_app.app_context():
             msg = ""
@@ -1398,6 +1412,7 @@ def handle_admin_register_submission(ack, body, view, client):
                 
                 db.session.commit()
                 msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 등록되었습니다."
+                target_msg = f"✅ <#{target_id}> 님이 *{event.title}* 이벤트에 등록되었습니다."
 
             # --- MODE 2: CATEGORY ---
             elif mode == "cat":
@@ -1417,6 +1432,8 @@ def handle_admin_register_submission(ack, body, view, client):
                 
                 db.session.commit()
                 msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 등록되었습니다."
+                event_names = [e.title for e in cat_events]
+                target_msg = f"✅ <#{target_id}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
 
             # --- MODE 3: ALL ---
             elif mode == "all":
@@ -1429,13 +1446,18 @@ def handle_admin_register_submission(ack, body, view, client):
                 
                 db.session.commit()
                 msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 등록되었습니다."
+                event_names = [e.title for e in all_events]
+                target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
 
         # 2. Notify the Admin (Ephemeral in the original channel)
         client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
-        
+        config = AppConfig.query.get("consultant_channel")
+        if config and config.value:
+            client.chat_postMessage(channel=config.value, text=target_msg)
         # 3. Notify the Target Channel (Public message)
         # Using chat_postMessage ensures the channel sees the update.
-        client.chat_postMessage(channel=target_id, text=f"📢 관리자에 의해 채널 등록이 업데이트되었습니다:\n{msg}")
+        if to_send_target is True:
+            client.chat_postMessage(channel=target_id, text=target_msg)
 
     except Exception as e:
         print(f"CRITICAL ERROR in submission: {e}")
