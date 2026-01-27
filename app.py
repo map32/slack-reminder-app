@@ -1363,9 +1363,9 @@ def handle_admin_sub_submission(ack, body, view, client):
     
     # Notify Admin of success
     client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
-    if config_id:
-        client.chat_postMessage(channel=config_id, text=target_msg)
     if to_send_target is True:
+        if config_id:
+            client.chat_postMessage(channel=config_id, text=target_msg)
         client.chat_postMessage(channel=target_user, text=target_msg)
 
 from datetime import datetime
@@ -1414,6 +1414,7 @@ def handle_admin_register_submission(ack, body, view, client):
                 db.session.commit()
                 msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 등록되었습니다."
                 target_msg = f"✅ <#{target_id}> 님이 *{event.title}* 이벤트에 등록되었습니다."
+                to_send_target = True
 
             # --- MODE 2: CATEGORY ---
             elif mode == "cat":
@@ -1435,6 +1436,7 @@ def handle_admin_register_submission(ack, body, view, client):
                 msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 등록되었습니다."
                 event_names = [e.title for e in cat_events]
                 target_msg = f"✅ <#{target_id}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+                to_send_target = True
 
             # --- MODE 3: ALL ---
             elif mode == "all":
@@ -1449,16 +1451,17 @@ def handle_admin_register_submission(ack, body, view, client):
                 msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 등록되었습니다."
                 event_names = [e.title for e in all_events]
                 target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+                to_send_target = True
             config = AppConfig.query.get("consultant_channel")
             config_id = config.value if config else None
 
         # 2. Notify the Admin (Ephemeral in the original channel)
         client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
-        if config_id:
-            client.chat_postMessage(channel=config_id, text=target_msg)
         # 3. Notify the Target Channel (Public message)
         # Using chat_postMessage ensures the channel sees the update.
         if to_send_target is True:
+            if config_id:
+                client.chat_postMessage(channel=config_id, text=target_msg)
             client.chat_postMessage(channel=target_id, text=target_msg)
 
     except Exception as e:
