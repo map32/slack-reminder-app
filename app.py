@@ -1553,6 +1553,7 @@ def handle_admin_event_search(ack, body):
 
 @bolt_app.options("event_subscribed")
 def handle_admin_event_subscribed_search(ack, body):
+    logger.info("body state: ", body.get("view", {}).get("state", {}))
     # Safe navigation
     view = body.get("view", {})
     state_values = view.get("state", {}).get("values", {})
