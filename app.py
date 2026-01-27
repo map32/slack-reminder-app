@@ -920,10 +920,24 @@ def get_category_options():
 
 
 @bolt_app.action("conversations_select")
-def handle_channel_selection(ack):
-    # This tells Slack: "I received the selection, don't do anything else."
-    # The state is now saved in the view's memory on Slack's end.
+def handle_channel_selection(ack, body, client):
+    # 1. Acknowledge the action immediately
     ack()
+    
+    # 2. Force the view to refresh itself.
+    # This acts as a "Save" button for the current state of the modal.
+    client.views_update(
+        view_id=body["view"]["id"],
+        hash=body["view"]["hash"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_register",
+            "private_metadata": body["view"]["private_metadata"],
+            "title": body["view"]["title"],
+            "submit": body["view"]["submit"],
+            "blocks": body["view"]["blocks"]
+        }
+    )
 
 # --- Navigation & Home ---
 @bolt_app.event("app_home_opened")
@@ -1556,58 +1570,79 @@ def handle_admin_event_search(ack, body):
 
 @bolt_app.options("event_subscribed")
 def handle_admin_event_subscribed_search(ack, body):
-    # Use f-string to ensure the dictionary actually prints
-    # Also look at the 'view' top level
-    view_data = body.get("view")
-    
-    if view_data:
-        state = view_data.get("state", {}).get("values", {})
-        print(f"DEBUG: Full State Values: {json.dumps(state, indent=2)}")
-    else:
-        print("DEBUG: No view data found in body")
-
-    # Access the channel_id
-    # Path: state -> block_id -> action_id -> selected_conversation
-    channel_id = (
-        body.get("view", {})
-        .get("state", {})
-        .get("values", {})
-        .get("target_user", {})        # block_id
-        .get("conversations_select", {}) # action_id
-        .get("selected_conversation")    # value
-    )
-
-    print(f"DEBUG: Extracted channel_id: {channel_id}")
-    # Safe navigation
-    view = body.get("view", {})
-    state_values = view.get("state", {}).get("values", {})
-    
-    # IMPORTANT: Accessory values in a section block are accessed 
-    # slightly differently than input block values.
-    target_block = state_values.get("target_user", {})
-    target_action = target_block.get("conversations_select", {})
-    
-    # For a conversations_select, it's 'selected_conversation'
-    channel_id = target_action.get("selected_conversation")
-
-    if not channel_id:
-        return ack(options=[{"text": {"type": "plain_text", "text": "⚠️ 채널을 먼저 선택하세요"}, "value": "none"}])
-
-    with flask_app.app_context():
-        # Your DB query logic remains the same
-        results = db.session.query(Subscription, Event)\
-            .join(Event, Subscription.event_id == Event.id)\
-            .filter(Subscription.channel_id == channel_id, Subscription.status == 'Pending')\
-            .all()
-
-        options = [
-            {
-                "text": {"type": "plain_text", "text": f"{event.title[:50]} ({event.event_date.strftime('%Y-%m-%d')})"},
-                "value": str(event.id)
-            } for sub, event in results
-        ]
+    """
+    Dynamically loads events based on the channel/user selected in the first block.
+    """
+    try:
+        # 1. Safe Extraction of the state
+        # Path: View -> State -> Values -> block_id (target_user) -> action_id (conversations_select)
+        view = body.get("view", {})
+        state_values = view.get("state", {}).get("values", {})
         
-        ack(options=options if options else [{"text": {"type": "plain_text", "text": "검색 결과 없음"}, "value": "none"}])
+        # Logging the state to verify 'target_user' is present after the sync
+        logger.info(f"Current State Keys: {list(state_values.keys())}")
+        
+        target_block = state_values.get("target_user", {})
+        target_action = target_block.get("conversations_select", {})
+        channel_id = target_action.get("selected_conversation")
+
+        # 2. Validation: If channel_id is still missing
+        if not channel_id:
+            logger.warning("Options requested but channel_id is missing from state.")
+            return ack(options=[
+                {
+                    "text": {"type": "plain_text", "text": "⚠️ 위에서 채널을 먼저 선택해주세요"},
+                    "value": "none"
+                }
+            ])
+
+        # 3. Database Query
+        with flask_app.app_context():
+            # Query returns a list of tuples: [(Subscription, Event), ...]
+            results = db.session.query(Subscription, Event)\
+                .join(Event, Subscription.event_id == Event.id)\
+                .filter(
+                    Subscription.channel_id == channel_id, 
+                    Subscription.status == 'Pending'
+                ).all()
+
+            options = []
+            
+            for sub, event in results:
+                # Formatting the date and title
+                date_str = event.event_date.strftime('%Y-%m-%d')
+                safe_title = event.title
+                
+                # Slack text limits (max 75 chars for option text)
+                occupied_len = len(date_str) + 5
+                max_title_len = 75 - occupied_len
+                
+                if len(safe_title) > max_title_len:
+                    safe_title = safe_title[:max(0, max_title_len - 3)] + "..."
+                
+                label_text = f"{safe_title} ({date_str})"
+                
+                options.append({
+                    "text": {"type": "plain_text", "text": label_text},
+                    "value": str(event.id)  # Sending the Event ID as the value
+                })
+
+            # 4. Final Response
+            if not options:
+                return ack(options=[
+                    {
+                        "text": {"type": "plain_text", "text": "❓ 대기 중인 신청건이 없습니다"},
+                        "value": "none"
+                    }
+                ])
+
+            # Successfully return the list to Slack
+            ack(options=options)
+
+    except Exception as e:
+        logger.error(f"Error in handle_admin_event_subscribed_search: {str(e)}", exc_info=True)
+        # Return an empty list so the UI doesn't hang on 'Loading...'
+        ack(options=[])
 
 # -------------------------
 # 5. Flask Routes
