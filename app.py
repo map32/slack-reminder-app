@@ -851,18 +851,15 @@ def open_admin_register_modal(ack, body, client, command):
                 },
                 # Input 1: User Picker
                 {
-                    "type": "input",
+                    "type": "section",
                     "block_id": "target_user",
-                    "label": {"type": "plain_text", "text": "유저 선택"},
-                    "element": {
+                    "text": {"type": "mrkdwn", "text": "*채널/유저 선택*"},
+                    "accessory": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
                         "filter": {
-                            "include": [
-                                "public",
-                                "private"
-                            ],
+                            "include": ["public", "private"],
                             "exclude_bot_users": True
                         }
                     }
@@ -918,6 +915,13 @@ def get_category_options():
     with flask_app.app_context():
         cats = EventType.query.all()
         return [{"text": {"type": "plain_text", "text": c.name}, "value": c.name} for c in cats]
+
+
+@bolt_app.action("conversations_select")
+def handle_channel_selection(ack):
+    # This tells Slack: "I received the selection, don't do anything else."
+    # The state is now saved in the view's memory on Slack's end.
+    ack()
 
 # --- Navigation & Home ---
 @bolt_app.event("app_home_opened")
@@ -1026,18 +1030,15 @@ def open_admin_register_modal_(ack, body, client):
                 },
                 # Input 1: User Picker
                 {
-                    "type": "input",
+                    "type": "section",
                     "block_id": "target_user",
-                    "label": {"type": "plain_text", "text": "유저 선택"},
-                    "element": {
+                    "text": {"type": "mrkdwn", "text": "*채널/유저 선택*"},
+                    "accessory": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
                         "filter": {
-                            "include": [
-                                "public",
-                                "private"
-                            ],
+                            "include": ["public", "private"],
                             "exclude_bot_users": True
                         }
                     }
@@ -1337,7 +1338,7 @@ def handle_admin_register_submission(ack, body, view, client):
     
     # 1. Extract Data
     values = view["state"]["values"]
-    target_user = values["target_user"]["conversations_select"]["selected_conversation"]
+    target_user = view["state"]["values"]["target_user"]["conversations_select"]["selected_conversation"]
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
     # Context info
@@ -1552,58 +1553,36 @@ def handle_admin_event_search(ack, body):
 
 @bolt_app.options("event_subscribed")
 def handle_admin_event_subscribed_search(ack, body):
-    # 1. Drill down safely. If target_user or conversations_select is missing, 
-    # .get() will return an empty dict instead of raising KeyError.
+    # Safe navigation
     view = body.get("view", {})
     state_values = view.get("state", {}).get("values", {})
     
-    target_user_block = state_values.get("target_user", {})
-    conv_select = target_user_block.get("conversations_select", {})
+    # IMPORTANT: Accessory values in a section block are accessed 
+    # slightly differently than input block values.
+    target_block = state_values.get("target_user", {})
+    target_action = target_block.get("conversations_select", {})
     
-    # This retrieves the ID of the channel/user chosen in the first step
-    channel_id = conv_select.get("selected_conversation")
+    # For a conversations_select, it's 'selected_conversation'
+    channel_id = target_action.get("selected_conversation")
 
-    # 2. Check if the value actually exists before querying
     if not channel_id:
-        # Return a message to the UI so the user knows why the list is empty
-        return ack(options=[
-            {
-                "text": {"type": "plain_text", "text": "⚠️ 채널/유저를 먼저 선택하세요"},
-                "value": "none"
-            }
-        ])
+        return ack(options=[{"text": {"type": "plain_text", "text": "⚠️ 채널을 먼저 선택하세요"}, "value": "none"}])
 
-    # 3. Proceed with Database Query
     with flask_app.app_context():
-        # 2. Query returns a list of tuples: [(Subscription, Event), (Subscription, Event)...]
+        # Your DB query logic remains the same
         results = db.session.query(Subscription, Event)\
             .join(Event, Subscription.event_id == Event.id)\
-            .filter(
-                Subscription.channel_id == channel_id, 
-                Subscription.status == 'Pending'
-            ).all()
+            .filter(Subscription.channel_id == channel_id, Subscription.status == 'Pending')\
+            .all()
 
-        options = []
+        options = [
+            {
+                "text": {"type": "plain_text", "text": f"{event.title[:50]} ({event.event_date.strftime('%Y-%m-%d')})"},
+                "value": str(event.id)
+            } for sub, event in results
+        ]
         
-        # 3. FIX: Unpack the tuple (sub, event)
-        for sub, event in results:
-            date_str = event.event_date.strftime('%Y-%m-%d')
-            safe_title = event.title
-            
-            # Formatting logic (User's original logic preserved)
-            occupied_len = len(date_str) + 5
-            max_title_len = 75 - occupied_len
-            
-            if len(safe_title) > max_title_len:
-                safe_title = safe_title[:max(0, max_title_len - 3)] + "..."
-            
-            label_text = f"{safe_title} ({date_str})"
-            
-            options.append({
-                "text": {"type": "plain_text", "text": label_text},
-                "value": str(event.id) # Ensure value is the Event ID (or Subscription ID based on your need)
-            })
-    ack(options=options)
+        ack(options=options if options else [{"text": {"type": "plain_text", "text": "검색 결과 없음"}, "value": "none"}])
 
 # -------------------------
 # 5. Flask Routes
