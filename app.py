@@ -1553,16 +1553,17 @@ def handle_admin_event_search(ack, body):
 def handle_admin_event_subscribed_search(ack, body):
     """Dynamically load events for admin subscription modal."""
     
-    # 1. FIX: Extract private_metadata correctly from the view payload
-    # Note: private_metadata is only available if this input is inside a Modal.
+    # 1. FIX: Extract channel_id from the view state
+    # Note: In an options handler, the view state is nested under body["view"]["state"]["values"]
     try:
-        channel_id = body["target_user"]["conversations_select"]["selected_conversation"]
-        print(channel_id)
+        channel_id = body["view"]["state"]["values"]["target_user"]["conversations_select"]["selected_conversation"]
         if not channel_id:
             # Fallback or error handling if metadata is missing
             ack(options=[])
             return
-    except KeyError:
+    except KeyError as e:
+        logger.error(f"KeyError in handle_admin_event_subscribed_search: {e}")
+        logger.error(f"Body structure: {body}")
         ack(options=[])
         return
 
