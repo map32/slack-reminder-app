@@ -1032,7 +1032,6 @@ def open_admin_register_modal_(ack, body, client):
                     "element": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
                         "filter": {
                             "include": [
@@ -1116,7 +1115,6 @@ def open_admin_sub_modal_(ack, body, client):
                     "element": {
                         "type": "conversations_select",
                         "action_id": "conversations_select",
-                        "dispatch_action": True,
                         "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
                         "filter": {
                             "include": [
@@ -1551,30 +1549,31 @@ def handle_admin_event_search(ack, body):
             })
     ack(options=options)
 
+
 @bolt_app.options("event_subscribed")
 def handle_admin_event_subscribed_search(ack, body):
-    """Dynamically load events for admin subscription modal."""
+    # 1. Drill down safely. If target_user or conversations_select is missing, 
+    # .get() will return an empty dict instead of raising KeyError.
+    view = body.get("view", {})
+    state_values = view.get("state", {}).get("values", {})
     
-    # 1. Extract channel_id from the view state
-    # Note: The user may not have filled in target_user yet, so check if it exists first
-    try:
-        view_values = body["view"]["state"]["values"]
-        
-        # Check if target_user has been filled in yet
-        if "target_user" not in view_values:
-            ack(options=[])
-            return
-        
-        channel_id = view_values["target_user"]["conversations_select"].get("selected_conversation")
-        if not channel_id:
-            ack(options=[])
-            return
-    except KeyError as e:
-        logger.error(f"KeyError in handle_admin_event_subscribed_search: {e}")
-        logger.error(f"Body structure: {body}")
-        ack(options=[])
-        return
+    target_user_block = state_values.get("target_user", {})
+    conv_select = target_user_block.get("conversations_select", {})
+    
+    # This retrieves the ID of the channel/user chosen in the first step
+    channel_id = conv_select.get("selected_conversation")
 
+    # 2. Check if the value actually exists before querying
+    if not channel_id:
+        # Return a message to the UI so the user knows why the list is empty
+        return ack(options=[
+            {
+                "text": {"type": "plain_text", "text": "⚠️ 채널/유저를 먼저 선택하세요"},
+                "value": "none"
+            }
+        ])
+
+    # 3. Proceed with Database Query
     with flask_app.app_context():
         # 2. Query returns a list of tuples: [(Subscription, Event), (Subscription, Event)...]
         results = db.session.query(Subscription, Event)\
