@@ -2,8 +2,8 @@ name: Trigger Daily Reminders
 
 on:
   schedule:
-    # 9:00 AM KST = 00:00 UTC
-    - cron: '0 0 * * *'
+    # 9:12 AM KST = 00:12 UTC
+    - cron: '12 0 * * *'
   workflow_dispatch:
 
 jobs:
