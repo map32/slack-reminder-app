@@ -663,10 +663,9 @@ def open_send_message_modal(ack, body, client):
 def open_interval_settings_modal(ack, body, client):
     ack()
     user_id = body["user"]["id"]
-    channel_id = body['channel']['id']
     with flask_app.app_context():
         if not is_user_admin(user_id):
-            client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
             return
         
         # Fetch current setting
