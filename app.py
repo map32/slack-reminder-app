@@ -6,6 +6,7 @@ import math
 import secrets
 import json
 from datetime import datetime, timedelta
+from xml.parsers.expat import errors
 from dotenv import load_dotenv
 
 from flask import Flask, request
@@ -496,97 +497,6 @@ def handle_list_channels(ack, respond, command):
             msg += f"• {status_emoji} {status_text} <#{sub.channel_id}>\n"
 
         respond(msg)
-
-@bolt_app.command("/check-pending")
-def handle_check_pending(ack, respond, command):
-    ack()
-    user_id = command["user_id"]
-    query_text = command["text"].strip()
-
-    with flask_app.app_context():
-        if not is_user_admin(user_id):
-            respond("🚫 관리자 권한이 없습니다.")
-            return
-
-        # Find the event
-        event, err = find_event_by_query(query_text)
-        if err:
-            respond(err)
-            return
-
-        # Find Pending Subscriptions
-        pending_subs = Subscription.query.filter_by(event_id=event.id, status="Pending").all()
-        registered_count = Subscription.query.filter_by(event_id=event.id, status="Registered").count()
-        
-        if not pending_subs:
-            respond(f"🎉 *{event.title}*: 모든 학생이 등록을 완료했습니다! ({registered_count}명 완료)")
-            return
-
-        # Build List
-        msg = f"🚨 *{event.title}* 미등록 학생 리스트 ({len(pending_subs)}명):\n"
-        for sub in pending_subs:
-            msg += f"• <#{sub.channel_id}>\n"
-        
-        msg += f"\n✅ 등록 완료: {registered_count}명"
-        msg += f"\n👉 `/nudge-pending {event.id}` 를 입력하여 알림을 보낼 수 있습니다."
-        
-        respond(msg)
-
-@bolt_app.command("/nudge-pending")
-def handle_nudge_pending(ack, respond, client, command):
-    ack()
-    user_id = command["user_id"]
-    query_text = command["text"].strip()
-
-    with flask_app.app_context():
-        if not is_user_admin(user_id):
-            respond("🚫 관리자 권한이 없습니다.")
-            return
-
-        # Find the event
-        event, err = find_event_by_query(query_text)
-        if err:
-            respond(err)
-            return
-
-        # Find Pending Subscriptions
-        pending_subs = Subscription.query.filter_by(event_id=event.id, status="Pending").all()
-        
-        if not pending_subs:
-            respond(f"✅ *{event.title}*: 알림을 보낼 대상이 없습니다 (모두 등록 완료).")
-            return
-
-        count = 0
-        for sub in pending_subs:
-            try:
-                # Send the Nudge DM
-                client.chat_postMessage(
-                    channel=sub.channel_id,
-                    text=f"👋 안녕하세요! 담당 컨설턴트가 *{event.title}* 등록 여부를 확인 중입니다.",
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": f"👋 안녕하세요! \n*{event.title}* 등록을 아직 완료하지 않으신 것 같습니다.\n확인 부탁드립니다!"}
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "✅ 등록 완료"},
-                                    "style": "primary",
-                                    "value": str(event.id),
-                                    "action_id": "confirm_registration"
-                                }
-                            ]
-                        }
-                    ]
-                )
-                count += 1
-            except Exception as e:
-                logger.error(f"Failed to nudge {sub.channel_id}: {e}")
-
-        respond(f"📨 *{event.title}*: 미등록 학생 *{count}명*에게 알림을 발송했습니다.")
 
 #sends messages to all students subscribed to an event
 @bolt_app.command("/send-event-message")
@@ -2058,6 +1968,81 @@ def trigger_reminders():
         except Exception as e:
             logger.error(f"Failed to send briefing: {e}")
 
+        try:
+            # ====================================================
+            # TASK A: Registration Deadline Reminder (Day Before)
+            # Target: Students subscribed but NOT yet 'Registered'
+            # ====================================================
+            deadline_evts = db.session.query(Subscription, Event)\
+                .join(Event, Subscription.event_id == Event.id)\
+                .filter(Event.registration_deadline == tomorrow)\
+                .filter(Subscription.status != 'Registered')\
+                .all()
+
+            for sub, event in deadline_evts:
+                try:
+                    msg_text = f"🚨 *마감 임박 알림: {event.title}*"
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"🚨 *마감 임박! 내일이 등록 마감일입니다.*"}
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn", 
+                                "text": f"*{event.title}*\n마감일: {event.registration_deadline}\n\n아직 등록이 완료되지 않았습니다. 참가를 원하시면 서둘러주세요!"
+                            },
+                            "accessory": {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "✅ 지금 등록하기"},
+                                "style": "primary",
+                                "value": str(event.id),
+                                "action_id": "confirm_registration"
+                            }
+                        }
+                    ]
+                    
+                    bolt_app.client.chat_postMessage(channel=sub.channel_id, text=msg_text, blocks=blocks)
+                except Exception as e:
+                    logger.error(f"Deadline Fail {sub.channel_id}: {str(e)}")
+
+        # ====================================================
+        # TASK B: Event Day Reminder (Day Before Event)
+        # Target: Students who ARE 'Registered'
+        # ====================================================
+        upcoming_evts = db.session.query(Subscription, Event)\
+            .join(Event, Subscription.event_id == Event.id)\
+            .filter(Event.event_date == tomorrow)\
+            .filter(Subscription.status == 'Registered')\
+            .all()
+
+        for sub, event in upcoming_evts:
+            try:
+                msg_text = f"📅 *D-1 알림: {event.title}*"
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {"type": "plain_text", "text": "📅 내일 만나요!"}
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn", 
+                            "text": f"내일은 *{event.title}* 이벤트가 있는 날입니다.\n잊지 말고 참석해주세요! 🙌"
+                        }
+                    },
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"🗓 일시: {event.event_date}"}]
+                    }
+                ]
+
+                bolt_app.client.chat_postMessage(channel=sub.channel_id, text=msg_text, blocks=blocks)
+                notifications_sent += 1
+            except Exception as e:
+                errors.append(f"Event Fail {sub.channel_id}: {str(e)}")
+
         return {"status": "success", "reminders_sent": total_sent}, 200
 
     except Exception as e:
@@ -2110,11 +2095,6 @@ def generate_morning_briefing(today):
                     "type": "context",
                     "elements": [{"type": "mrkdwn", "text": f"⚠️ *미등록 학생 {len(pending_subs)}명:* {student_list}"}]
                 })
-                # Actionable Tip
-                blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"👉 *조치:* `/nudge-pending {e.id}` 명령어로 독촉 알림 보내기"}]
-                })
             else:
                 # If everyone registered, show a mini success message
                 blocks.append({
@@ -2143,15 +2123,21 @@ def generate_morning_briefing(today):
         text_lines = ""
         for e in upcoming_events:
             # Calculate status summary
-            total = Subscription.query.filter_by(event_id=e.id).count()
-            pending = Subscription.query.filter_by(event_id=e.id, status="Pending").count()
-            registered = total - pending
+            total = Subscription.query.filter_by(event_id=e.id).all()
+            pending = Subscription.query.filter_by(event_id=e.id, status="Pending").all()
+            registered = len(total) - len(pending)
             
             # Status Logic: Green if all registered, Yellow if <3 pending, Red otherwise
-            status_icon = "🟢" if pending == 0 else "🟡" if pending < 3 else "🔴"
+            status_icon = "🟢" if len(pending) == 0 else "🟡" if len(pending) < 3 else "🔴"
             date_pretty = e.event_date.strftime('%m/%d')
-            
-            text_lines += f"{status_icon} *{date_pretty}:* {e.title} ({total}명 중 {registered}명 완료)\n"
+            if len(total) == 0:
+                text_lines += f"ℹ️ *{date_pretty}:* {e.title} (구독자 없음)\n"
+            else:
+                text_lines += f"{status_icon} *{date_pretty}:* {e.title} ({len(total)}명 중 {registered}명 완료)\n"
+                registered_students = [f"<#{sub.channel_id}>" for sub in total]
+                pending_students = [f"<#{sub.channel_id}>" for sub in pending]
+                text_lines += f"    • 등록 완료: {', '.join(registered_students) if registered_students else '없음'}\n"
+                text_lines += f"    • 미등록: {', '.join(pending_students) if pending_students else '없음'}\n"
         
         blocks.append({
             "type": "section",
