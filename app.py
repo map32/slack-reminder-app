@@ -1967,7 +1967,7 @@ def trigger_reminders():
                 print("Briefing sent successfully.")
         except Exception as e:
             logger.error(f"Failed to send briefing: {e}")
-
+        tomorrow = today + timedelta(days=1)
         try:
             # ====================================================
             # TASK A: Registration Deadline Reminder (Day Before)
@@ -2039,9 +2039,8 @@ def trigger_reminders():
                 ]
 
                 bolt_app.client.chat_postMessage(channel=sub.channel_id, text=msg_text, blocks=blocks)
-                notifications_sent += 1
             except Exception as e:
-                errors.append(f"Event Fail {sub.channel_id}: {str(e)}")
+                logger.error(f"Event Fail {sub.channel_id}: {str(e)}")
 
         return {"status": "success", "reminders_sent": total_sent}, 200
 
