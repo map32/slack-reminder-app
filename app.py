@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import logging
 import re
@@ -97,6 +98,15 @@ class TrackedStudent(db.Model):
     
     # Prevent duplicate tracking entries
     __table_args__ = (db.UniqueConstraint('consultant_id', 'channel_id', name='_consultant_student_uc'),)
+
+class ChannelNotification(db.Model):
+    """Stores notification intervals for specific channels"""
+    __tablename__ = 'channel_notification'
+    id = db.Column(db.BigInteger, primary_key=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    interval = db.Column(db.Integer, nullable=False, default=7)
+    channel_id = db.Column(db.String(50), nullable=False, unique=True)
+
 
 # Initialize DB and Seed Data
 with flask_app.app_context():
@@ -284,7 +294,8 @@ def get_dashboard_view(user_id):
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Category"}, "action_id": "open_add_type_modal"},
                 {"type": "button", "text": {"type": "plain_text", "text": "Subscribe Channel"}, "action_id": "open_admin_sub_modal"},
                 {"type": "button", "text": {"type": "plain_text", "text": "Register Channel"}, "action_id": "open_admin_register_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Manage Admins"}, "action_id": "open_manage_admins_modal"}
+                {"type": "button", "text": {"type": "plain_text", "text": "Manage Admins"}, "action_id": "open_manage_admins_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Notification Settings"}, "action_id": "open_interval_settings_modal"}
             ]
         })
         blocks.append({"type": "divider"})
@@ -454,6 +465,38 @@ def handle_list_subs(ack, respond, command):
         
         respond(response)
 
+@bolt_app.command("/list-channels")
+def handle_list_channels(ack, respond, command):
+    # Acknowledge command request
+    ack()
+    user_id = command["user_id"]
+    query_text = command["text"].strip()
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            respond("🚫 관리자 권한이 없습니다.")
+            return
+
+        # Find the event
+        event, err = find_event_by_query(query_text)
+        if err:
+            respond(err)
+            return
+
+        # Find Subscribed Channels
+        subs = Subscription.query.filter_by(event_id=event.id).all()
+        if not subs:
+            respond(f"ℹ️ *{event.title}*: 구독한 채널이 없습니다.")
+            return
+
+        # Build List
+        msg = f"*📋 {event.title}* 구독 채널 리스트 ({len(subs)}개):\n"
+        for sub in subs:
+            status_emoji = "✅" if sub.status == "Registered" else "⏳"
+            status_text = "*등록* *완료*" if sub.status == "Registered" else "*미등록*"
+            msg += f"• {status_emoji} {status_text} <#{sub.channel_id}>\n"
+
+        respond(msg)
+
 @bolt_app.command("/check-pending")
 def handle_check_pending(ack, respond, command):
     ack()
@@ -615,6 +658,150 @@ def open_send_message_modal(ack, body, client):
             ]
         }
     )
+
+@bolt_app.action("open_interval_settings_modal")
+def open_interval_settings_modal(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel_id = body['channel']['id']
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+        
+        # Fetch current setting
+        config = AppConfig.query.filter_by(key="notification_interval").first()
+        current_value = config.value if config else "7"
+        
+        # Fetch all channels with subscriptions
+        subscribed_channels = db.session.query(Subscription.channel_id).distinct().all()
+        channel_options = [{"text": {"type": "plain_text", "text": f"<#{ch[0]}>"}, "value": ch[0]} for ch in subscribed_channels]
+        
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "submit_interval_settings",
+            "title": {"type": "plain_text", "text": "Notification Interval"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "interval_block",
+                    "label": {"type": "plain_text", "text": "그룹 알림간격 (days)"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "interval_input",
+                        "initial_value": current_value,
+                        "placeholder": {"type": "plain_text", "text": "Enter number of days"}
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "channels_block",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "채널 선택 (선택사항)"},
+                    "element": {
+                        "type": "multi_static_select",
+                        "action_id": "channels_select",
+                        "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
+                        "options": channel_options if channel_options else [{"text": {"type": "plain_text", "text": "채널 없음"}, "value": "none"}]
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "channel_interval_block",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "채널별 알림간격 (days)"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "channel_interval_input",
+                        "initial_value": "7",
+                        "placeholder": {"type": "plain_text", "text": "Enter number of days"}
+                    }
+                },
+                {
+                    "type": "actions",
+                    "block_id": "submit_buttons",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "그룹 저장"},
+                            "value": "group",
+                            "action_id": "save_group_interval",
+                            "style": "primary"
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "채널별 저장"},
+                            "value": "channel",
+                            "action_id": "save_channel_interval"
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+@bolt_app.action("save_group_interval")
+def handle_save_group_interval(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel_id = body['channel']['id']
+    
+    # Get the interval value from the view
+    view = body["view"]
+    values = view["state"]["values"]
+    interval_value = values["interval_block"]["interval_input"]["value"]
+    
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+        
+        config = AppConfig.query.filter_by(key="notification_interval").first()
+        if not config:
+            config = AppConfig(key="notification_interval", value=interval_value)
+            db.session.add(config)
+        else:
+            config.value = interval_value
+        db.session.commit()
+        
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text=f"✅ 그룹 알림 간격이 '{interval_value}'로 설정되었습니다.")
+
+@bolt_app.action("save_channel_interval")
+def handle_save_channel_interval(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel_id = body['channel']['id']
+    
+    # Get the values from the view
+    view = body["view"]
+    values = view["state"]["values"]
+    selected_channels = values.get("channels_block", {}).get("channels_select", {}).get("selected_conversations", [])
+    interval_value = values.get("channel_interval_block", {}).get("channel_interval_input", {}).get("value", "7")
+    
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+        
+        if not selected_channels:
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="⚠️ 적어도 하나의 채널을 선택해주세요.")
+            return
+        
+        # Save interval for each selected channel using ChannelNotification model
+        for selected_channel in selected_channels:
+            channel_notif = ChannelNotification.query.filter_by(channel_id=selected_channel).first()
+            if not channel_notif:
+                channel_notif = ChannelNotification(channel_id=selected_channel, interval=int(interval_value))
+                db.session.add(channel_notif)
+            else:
+                channel_notif.interval = int(interval_value)
+        
+        db.session.commit()
+        
+        channel_names = ", ".join([f"<#{ch}>" for ch in selected_channels])
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text=f"✅ {channel_names} 채널의 알림 간격이 '{interval_value}'로 설정되었습니다.")
 
 @bolt_app.view("submit_send_event_message")
 def handle_send_message_submission(ack, body, view, client):
@@ -1288,14 +1475,14 @@ def handle_registration_confirm(ack, body, client):
             # Notify the channel where the button was clicked
             client.chat_postMessage(
                 channel=target_channel_id,
-                text=f"🎉 *{event.title}* 등록을 완료했습니다!"
+                text=f"🎉 *{event.title}* 신청과 등록을 완료했습니다!"
             )
             
             # Notify the Consultants
             if config:
                 client.chat_postMessage(
                     channel=config.value,
-                    text=f"🎉 *등록 확인:* <#{target_channel_id}> 채널이 *{event.title}* 등록을 완료했습니다!"
+                    text=f"🎉 *등록 확인:* <#{target_channel_id}> 채널이 *{event.title}* 신청과 등록을 완료했습니다!"
                 )
             
             db.session.commit()
@@ -1384,11 +1571,11 @@ def handle_admin_sub_submission(ack, body, view, client):
             # Subscribe
             if not Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first():
                 db.session.add(Subscription(channel_id=target_user, event_id=event_id, status='Pending'))
-                msg = f"✅ <#{target_user}> 님을 *{event.title}*에 구독시켰습니다."
+                msg = f"✅ <#{target_user}> 님이 *{event.title}*에 예정되었습니다."
                 to_send_target = True
-                target_msg = f"✅ <#{target_user}> 님이 *{event.title}* 이벤트에 구독되었습니다."
+                target_msg = f"✅ <#{target_user}> 님이 *{event.title}*에 예정되었습니다."
             else:
-                msg = f"ℹ️ <#{target_user}> 님은 이미 해당 이벤트에 구독 중입니다."
+                msg = f"ℹ️ <#{target_user}> 님은 이미 해당 이벤트에 예정되어 있습니다."
 
         # --- MODE 2: CATEGORY ---
         elif mode == "cat":
@@ -1405,10 +1592,10 @@ def handle_admin_sub_submission(ack, body, view, client):
                 if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
                     db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
-            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 구독시켰습니다."
+            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 예정되었습니다."
             to_send_target = True
             event_names = [e.title for e in cat_events]
-            target_msg = f"✅ <#{target_user}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 구독되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+            target_msg = f"✅ <#{target_user}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 예정되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
 
         # --- MODE 3: ALL ---
         elif mode == "all":
@@ -1418,10 +1605,10 @@ def handle_admin_sub_submission(ack, body, view, client):
                 if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
                     db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
                     count += 1
-            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 구독시켰습니다."
+            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 예정되었습니다."
             to_send_target = True
             event_names = [e.title for e in all_events]
-            target_msg = f"✅ <#{target_user}> 님이 *모든 이벤트*에 구독되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+            target_msg = f"✅ <#{target_user}> 님이 *모든 이벤트*에 예정되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
         config = AppConfig.query.get("consultant_channel")
         config_id = config.value if config else None
         db.session.commit()
@@ -1480,8 +1667,8 @@ def handle_admin_register_submission(ack, body, view, client):
                     db.session.add(Subscription(channel_id=target_id, event_id=event_id, status='Registered'))
                 
                 db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 등록되었습니다."
-                target_msg = f"✅ <#{target_id}> 님이 *{event.title}* 이벤트에 등록되었습니다."
+                msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 신청과 등록이 되었습니다.."
+                target_msg = f"✅ <#{target_id}> 님이 *{event.title}*에 신청과 등록이 되었습니다."
                 to_send_target = True
 
             # --- MODE 2: CATEGORY ---
@@ -1501,9 +1688,9 @@ def handle_admin_register_submission(ack, body, view, client):
                         count += 1
                 
                 db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 등록되었습니다."
+                msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 신청과 등록이 되었습니다."
                 event_names = [e.title for e in cat_events]
-                target_msg = f"✅ <#{target_id}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+                target_msg = f"✅ <#{target_id}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 신청과 등록이 되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
                 to_send_target = True
 
             # --- MODE 3: ALL ---
@@ -1516,9 +1703,9 @@ def handle_admin_register_submission(ack, body, view, client):
                         count += 1
                 
                 db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 등록되었습니다."
+                msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 신청과 등록이 되었습니다."
                 event_names = [e.title for e in all_events]
-                target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 등록되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+                target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 신청과 등록이 되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
                 to_send_target = True
             config = AppConfig.query.get("consultant_channel")
             config_id = config.value if config else None
@@ -1715,6 +1902,7 @@ def keep_alive():
 # Secure Cron Trigger
 @flask_app.route("/api/run-reminders", methods=["POST"])
 def trigger_reminders():
+    # --- 1. Security Check ---
     auth_header = request.headers.get("Authorization")
     cron_secret = os.environ.get("CRON_SECRET")
     
@@ -1728,71 +1916,128 @@ def trigger_reminders():
     except ValueError:
         return {"error": "Unauthorized"}, 401
 
+    # --- 2. Process Reminders ---
     try:
         today = datetime.now().date()
         total_sent = 0
+        
+        # Query active events
+        data = db.session.query(Subscription, Event)\
+            .join(Event, Subscription.event_id == Event.id)\
+            .filter(Event.registration_deadline >= today).all()
+        
+        # Group by channel_id
+        events_by_user = defaultdict(list)
+        for sub, event in data:
+            events_by_user[sub.channel_id].append((event, sub))
+        
+        # Iterate through each user
+        for channel_id, items in events_by_user.items():
+            if not items: continue
 
-        def notify(evt, msg):
-            cnt = 0
-            # 🆕 Only notify if they haven't registered yet? 
-            # Or notify everyone and let them confirm? 
-            # Decision: Notify everyone, but only show button if status is Pending.
-            for sub in Subscription.query.filter_by(event_id=evt.id).all():
-                try:
-                    blocks = [
-                        {"type": "section", "text": {"type": "mrkdwn", "text": msg}}
-                    ]
+            user_slack_id = items[0][1].channel_id
+            
+            # We will build the blocks list directly now
+            blocks = []
+
+            # -- Header --
+            blocks.append({
+                "type": "header",
+                "text": {"type": "plain_text", "text": "👤 학생 분석 보고서"}
+            })
+            blocks.append({"type": "divider"})
+            
+            # Lists to track counts for the fallback text
+            pending_count = 0
+            registered_lines = []
+
+            # -- Dynamic Event Loop --
+            # We iterate through events and append blocks immediately
+            
+            # 1. Header for Pending (only if there are pending items)
+            # Check if there are any pending items first to render the header
+            has_pending = any(sub.status != "Registered" for event, sub in items)
+            
+            if has_pending:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*📅 미등록된 이벤트 (작업 필요):*"}
+                })
+
+            for event, sub in items:
+                # --- REGISTERED EVENTS (Keep compact) ---
+                if sub.status == "Registered":
+                    registered_lines.append(f"• ✅ *{event.title}* | 📅 {event.event_date}")
+                
+                # --- PENDING EVENTS (One block per event with button) ---
+                else:
+                    pending_count += 1
                     
-                    # 🆕 ADD CONFIRM BUTTON if Pending
-                    if sub.status == "Pending":
-                        blocks.append({
-                            "type": "actions",
-                            "elements": [{
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "✅ I Registered (등록 완료)"},
-                                "style": "primary",
-                                "value": str(evt.id),
-                                "action_id": "confirm_registration"
-                            }]
-                        })
-                    else:
-                        blocks.append({
-                            "type": "context",
-                            "elements": [{"type": "mrkdwn", "text": "✅ Status: Registered"}]
-                        })
+                    # 1. Build the text detail
+                    text_detail = f"*{event.title}*\n📅 날짜: {event.event_date}\n⏳ 상태: 미등록"
+                    
+                    # 2. Add Warning if close to deadline
+                    if event.registration_deadline <= (today + timedelta(days=3)):
+                        text_detail += f"\n🚨 *마감* *임박!* *({event.registration_deadline})*"
+                    
+                    # 3. Create the Section Block with Accessory Button
+                    event_block = {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": text_detail
+                        },
+                        "accessory": {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "✅ 등록하기", # "Register"
+                                "emoji": True
+                            },
+                            "style": "primary", # Green button
+                            "value": str(event.id),
+                            "action_id": "confirm_registration"
+                        }
+                    }
+                    blocks.append(event_block)
+                    # Add a small divider between pending items for cleaner look (optional)
+                    blocks.append({"type": "divider"})
 
-                    bolt_app.client.chat_postMessage(channel=sub.user_slack_id, text=msg, blocks=blocks)
-                    cnt += 1
-                except Exception as e: logger.error(f"Fail DM {sub.user_slack_id}: {e}")
-            return cnt
+            # If no pending events, show a success message
+            if not has_pending:
+                 blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*📅 미등록된 이벤트:* 없음 (모두 완료! 🎉)"}
+                })
 
-        for days_left in [0, 1, 2, 3]:
-            target_date = today + timedelta(days=days_left)
-            time_str = "오늘" if days_left == 0 else "내일" if days_left == 1 else f"{days_left}일 후"
+            # -- Registered Section --
+            # We keep these grouped to save vertical space, as no action is needed
+            if registered_lines:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "*📜 등록된 이벤트:*\n" + "\n".join(registered_lines)}
+                })
 
-            # 1. Registration Deadlines
-            deadline_events = Event.query.filter_by(registration_deadline=target_date).all()
-            for event in deadline_events:
-                msg = f"⚠️ *{event.event_type}* *{event.title}* 가입 데드라인이 *{time_str}* 닫힙니다 ({event.registration_deadline})!"
-                total_sent += notify(event, msg)
+            # --- Send DM ---
+            try:
+                fallback_msg = f"학생 분석 보고서: 미등록 {pending_count}건"
+                bolt_app.client.chat_postMessage(
+                    channel=user_slack_id, 
+                    text=fallback_msg, 
+                    blocks=blocks
+                )
+                total_sent += 1
+            except Exception as e:
+                logger.error(f"Fail DM {user_slack_id}: {e}")
 
-            # 2. Event Dates
-            test_day_events = Event.query.filter_by(event_date=target_date).all()
-            for event in test_day_events:
-                msg = f"📅 *이벤트 알림:* *{event.event_type}* *{event.title}*이 *{time_str}* 입니다 ({event.event_date})!"
-                total_sent += notify(event, msg)
-
-    # 2. Run Consultant Briefing
+        # --- 3. Run Consultant Briefing (Existing Logic) ---
         try:
             config = AppConfig.query.get("consultant_channel")
             if config:
-                # Generate the fancy blocks
                 briefing_blocks = generate_morning_briefing(today)
-                
-                # Post to the consultant channel
                 bolt_app.client.chat_postMessage(
                     channel=config.value,
-                    text="Morning Briefing", # Fallback text
+                    text="Morning Briefing",
                     blocks=briefing_blocks
                 )
                 print("Briefing sent successfully.")
