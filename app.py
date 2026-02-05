@@ -663,6 +663,11 @@ def open_send_message_modal(ack, body, client):
 def open_interval_settings_modal(ack, body, client):
     ack()
     user_id = body["user"]["id"]
+    
+    # Attempt to capture the channel where the command was triggered
+    # (If triggered from Home Tab, this might be None)
+    origin_channel = body.get("channel_id") or body.get("channel", {}).get("id") or user_id
+
     with flask_app.app_context():
         if not is_user_admin(user_id):
             client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
@@ -681,7 +686,13 @@ def open_interval_settings_modal(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "submit_interval_settings",
+            "private_metadata": origin_channel,  # ✅ Pass channel ID to the modal state
             "title": {"type": "plain_text", "text": "Notification Interval"},
+            
+            # ✅ REQUIRED: Slack requires this if using 'input' blocks
+            "submit": {"type": "plain_text", "text": "Done"}, 
+            "close": {"type": "plain_text", "text": "Close"},
+            
             "blocks": [
                 {
                     "type": "input",
@@ -690,7 +701,7 @@ def open_interval_settings_modal(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "interval_input",
-                        "initial_value": current_value,
+                        "initial_value": str(current_value),
                         "placeholder": {"type": "plain_text", "text": "Enter number of days"}
                     }
                 },
@@ -745,9 +756,10 @@ def open_interval_settings_modal(ack, body, client):
 def handle_save_group_interval(ack, body, client):
     ack()
     user_id = body["user"]["id"]
-    channel_id = body['channel']['id']
     
-    # Get the interval value from the view
+    # ✅ FIX: Retrieve channel from private_metadata (body['channel'] is unreliable in modals)
+    channel_id = body["view"]["private_metadata"]
+    
     view = body["view"]
     values = view["state"]["values"]
     interval_value = values["interval_block"]["interval_input"]["value"]
@@ -771,12 +783,16 @@ def handle_save_group_interval(ack, body, client):
 def handle_save_channel_interval(ack, body, client):
     ack()
     user_id = body["user"]["id"]
-    channel_id = body['channel']['id']
+    channel_id = body["view"]["private_metadata"] # ✅ FIX
     
-    # Get the values from the view
     view = body["view"]
     values = view["state"]["values"]
-    selected_channels = values.get("channels_block", {}).get("channels_select", {}).get("selected_conversations", [])
+    
+    # ✅ FIX: Correct key for multi_static_select is 'selected_options'
+    # And we must extract the 'value' from each option object
+    raw_selected_options = values.get("channels_block", {}).get("channels_select", {}).get("selected_options", [])
+    selected_channels = [opt['value'] for opt in raw_selected_options]
+    
     interval_value = values.get("channel_interval_block", {}).get("channel_interval_input", {}).get("value", "7")
     
     with flask_app.app_context():
@@ -784,11 +800,10 @@ def handle_save_channel_interval(ack, body, client):
             client.chat_postEphemeral(channel=channel_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
             return
         
-        if not selected_channels:
+        if not selected_channels or selected_channels == ["none"]:
             client.chat_postEphemeral(channel=channel_id, user=user_id, text="⚠️ 적어도 하나의 채널을 선택해주세요.")
             return
         
-        # Save interval for each selected channel using ChannelNotification model
         for selected_channel in selected_channels:
             channel_notif = ChannelNotification.query.filter_by(channel_id=selected_channel).first()
             if not channel_notif:
