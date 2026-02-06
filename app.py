@@ -141,7 +141,7 @@ def get_sorted_events(channel_id, category=None):
     ).outerjoin(
         Subscription,
         (Event.id == Subscription.event_id) & (Subscription.channel_id == channel_id)
-    ).filter(Event.registration_deadline >= today)
+    ).filter(Event.event_date >= today)
     
     if category:
         query = query.filter(Event.event_type == category)
