@@ -1997,44 +1997,43 @@ def trigger_reminders():
         except Exception as e:
             logger.error(f"Failed to send briefing: {e}")
         tomorrow = today + timedelta(days=1)
-        try:
-            # ====================================================
-            # TASK A: Registration Deadline Reminder (Day Before)
-            # Target: Students subscribed but NOT yet 'Registered'
-            # ====================================================
-            deadline_evts = db.session.query(Subscription, Event)\
-                .join(Event, Subscription.event_id == Event.id)\
-                .filter(Event.registration_deadline == tomorrow)\
-                .filter(Subscription.status != 'Registered')\
-                .all()
+        # ====================================================
+        # TASK A: Registration Deadline Reminder (Day Before)
+        # Target: Students subscribed but NOT yet 'Registered'
+        # ====================================================
+        deadline_evts = db.session.query(Subscription, Event)\
+            .join(Event, Subscription.event_id == Event.id)\
+            .filter(Event.registration_deadline == tomorrow)\
+            .filter(Subscription.status != 'Registered')\
+            .all()
 
-            for sub, event in deadline_evts:
-                try:
-                    msg_text = f"🚨 *마감 임박 알림: {event.title}*"
-                    blocks = [
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": f"🚨 *마감 임박! 내일이 등록 마감일입니다.*"}
+        for sub, event in deadline_evts:
+            try:
+                msg_text = f"🚨 *마감 임박 알림: {event.title}*"
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"🚨 *마감 임박! 내일이 등록 마감일입니다.*"}
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn", 
+                            "text": f"*{event.title}*\n마감일: {event.registration_deadline}\n\n아직 등록이 완료되지 않았습니다. 참가를 원하시면 서둘러주세요!"
                         },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn", 
-                                "text": f"*{event.title}*\n마감일: {event.registration_deadline}\n\n아직 등록이 완료되지 않았습니다. 참가를 원하시면 서둘러주세요!"
-                            },
-                            "accessory": {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "✅ 지금 등록하기"},
-                                "style": "primary",
-                                "value": str(event.id),
-                                "action_id": "confirm_registration"
-                            }
+                        "accessory": {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "✅ 지금 등록하기"},
+                            "style": "primary",
+                            "value": str(event.id),
+                            "action_id": "confirm_registration"
                         }
-                    ]
-                    
-                    bolt_app.client.chat_postMessage(channel=sub.channel_id, text=msg_text, blocks=blocks)
-                except Exception as e:
-                    logger.error(f"Deadline Fail {sub.channel_id}: {str(e)}")
+                    }
+                ]
+                
+                bolt_app.client.chat_postMessage(channel=sub.channel_id, text=msg_text, blocks=blocks)
+            except Exception as e:
+                logger.error(f"Deadline Fail {sub.channel_id}: {str(e)}")
 
         # ====================================================
         # TASK B: Event Day Reminder (Day Before Event)
