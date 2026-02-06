@@ -1741,7 +1741,7 @@ def handle_event_search(ack, body):
         # Search events by title
         events = Event.query.filter(
             Event.title.ilike(f"%{search_value}%"),
-            Event.registration_deadline >= datetime.now().date()
+            Event.event_date >= datetime.now().date()
         ).limit(100).all()
         
         options = []
@@ -1769,7 +1769,7 @@ def handle_admin_event_search(ack, body):
     with flask_app.app_context():
         events = Event.query.filter(
             Event.title.ilike(f"%{search_value}%"),
-            Event.registration_deadline >= datetime.now().date()
+            Event.event_date >= datetime.now().date()
         ).limit(100).all()
         options = []
         for e in events:
