@@ -308,7 +308,7 @@ def get_dashboard_view(user_id):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No categories defined."}})
         return blocks
 
-    items_per_cat = min(math.floor((remaining_blocks - (num_cats * 2)) / num_cats), 10)
+    items_per_cat = min(math.floor((remaining_blocks - (num_cats * 2)) / num_cats / 2), 5)
     items_per_cat = max(items_per_cat, 0) # Safety
 
     for cat in event_types:
