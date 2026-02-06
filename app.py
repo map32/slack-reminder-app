@@ -107,6 +107,7 @@ class ChannelNotification(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     interval = db.Column(db.Integer, nullable=False, default=7)
     channel_id = db.Column(db.String(50), nullable=False, unique=True)
+    last_interval = db.Column(db.DateTime, nullable=True)
 
 
 # Initialize DB and Seed Data
@@ -1872,7 +1873,7 @@ def trigger_reminders():
         if not secrets.compare_digest(received_token, cron_secret): raise ValueError
     except ValueError:
         return {"error": "Unauthorized"}, 401
-
+    
     # --- 2. Process Reminders ---
     try:
         today = datetime.now().date()
@@ -1882,7 +1883,9 @@ def trigger_reminders():
         data = db.session.query(Subscription, Event)\
             .join(Event, Subscription.event_id == Event.id)\
             .filter(Event.registration_deadline >= today).all()
-        
+        channel_intervals = db.session.query(ChannelNotification).all()
+        channel_interval_map = {cn.channel_id: cn for cn in channel_intervals}
+        channel_successful_map = defaultdict(set)
         # Group by channel_id
         events_by_user = defaultdict(list)
         for sub, event in data:
@@ -1891,7 +1894,6 @@ def trigger_reminders():
         # Iterate through each user
         for channel_id, items in events_by_user.items():
             if not items: continue
-
             user_slack_id = items[0][1].channel_id
             
             # We will build the blocks list directly now
@@ -1984,19 +1986,66 @@ def trigger_reminders():
                     blocks=blocks
                 )
                 total_sent += 1
+                channel_successful_map[channel_id].add(user_slack_id)
             except Exception as e:
                 logger.error(f"Fail DM {user_slack_id}: {e}")
+                channel_successful_map[channel_id].discard(user_slack_id)
+
+        # --- UPSERT LOGIC ---
+        for channel_id in channel_successful_map:
+            if channel_id in channel_interval_map:
+                # 1. UPDATE Case
+                # This object is already in the session (from your initial query).
+                # Just modifying the attribute marks it as "dirty".
+                cn = channel_interval_map[channel_id]
+                cn.last_interval = today
+            else:
+                # 2. INSERT Case
+                # This is a new channel not in the DB yet. Create and add.
+                cn = ChannelNotification(channel_id=channel_id, last_interval=today)
+                db.session.add(cn)
+        
+        # 3. COMMIT
+        # SQLAlchemy will batch all the UPDATES and INSERTS into a single transaction here.
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"User Reminder Database commit failed: {e}")
 
         # --- 3. Run Consultant Briefing (Existing Logic) ---
         try:
-            config = AppConfig.query.get("consultant_channel")
-            if config:
+            channel = AppConfig.query.get("consultant_channel")
+            interval = AppConfig.query.get("notification_interval")# days integer as string
+            last = AppConfig.query.get("notification_last_triggered") #YYYY-MM-DD string
+            if interval and interval.value.isdigit():
+                interval_days = int(interval.value)
+            else:
+                interval_days = 1  # Default to 1 day if not set properly
+
+            if last and last.value:
+                try:
+                    last_date = datetime.strptime(last.value, "%Y-%m-%d").date()
+                    if (today - last_date).days < interval_days:
+                        logger.info("Briefing already sent within the configured interval.")
+                        return  # Skip sending briefing if it's too soon
+                except ValueError:
+                    logger.warning("Failed to parse last triggered date.")
+
+            if channel:
                 briefing_blocks = generate_morning_briefing(today)
                 bolt_app.client.chat_postMessage(
-                    channel=config.value,
+                    channel=channel.value,
                     text="Morning Briefing",
                     blocks=briefing_blocks
                 )
+                # Update last triggered date
+                if last:
+                    last.value = today.strftime("%Y-%m-%d")
+                else:
+                    new_config = AppConfig(key="notification_last_triggered", value=today.strftime("%Y-%m-%d"))
+                    db.session.add(new_config)
+                db.session.commit()
                 print("Briefing sent successfully.")
         except Exception as e:
             logger.error(f"Failed to send briefing: {e}")
