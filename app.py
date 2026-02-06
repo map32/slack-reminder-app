@@ -2022,17 +2022,17 @@ def trigger_reminders():
                 interval_days = int(interval.value)
             else:
                 interval_days = 1  # Default to 1 day if not set properly
-
+            tosend = True
             if last and last.value:
                 try:
                     last_date = datetime.strptime(last.value, "%Y-%m-%d").date()
                     if (today - last_date).days < interval_days:
                         logger.info("Briefing already sent within the configured interval.")
-                        return  # Skip sending briefing if it's too soon
+                        tosend = False
                 except ValueError:
                     logger.warning("Failed to parse last triggered date.")
 
-            if channel:
+            if tosend is True and channel:
                 briefing_blocks = generate_morning_briefing(today)
                 bolt_app.client.chat_postMessage(
                     channel=channel.value,
