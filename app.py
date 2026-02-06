@@ -600,10 +600,10 @@ def open_interval_settings_modal(ack, body, client):
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
-            "callback_id": "submit_interval_settings",
+            "callback_id": "submit_nothing", # No submission handling needed
             "private_metadata": origin_channel,
             "title": {"type": "plain_text", "text": "Notification Settings"},
-            "close": {"type": "plain_text", "text": "Close"},
+            "submit": {"type": "plain_text", "text": "Close"},
             
             "blocks": [
                 # ==========================================
@@ -1491,6 +1491,10 @@ def handle_admin_sub(ack, body, view, client):
             db.session.add(AppAdmin(user_slack_id=uid))
             db.session.commit()
         client.views_publish(user_id=body["user"]["id"], view={"type": "home", "blocks": get_dashboard_view(body["user"]["id"])})
+
+@bolt_app.view("submit_nothing")
+def submit_nothing(ack, body, view, client):
+    ack()
 
 @bolt_app.view("submit_admin_sub")
 def handle_admin_sub_submission(ack, body, view, client):
