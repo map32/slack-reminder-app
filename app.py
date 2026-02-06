@@ -574,8 +574,7 @@ def open_interval_settings_modal(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     
-    # Attempt to capture the channel where the command was triggered
-    # (If triggered from Home Tab, this might be None)
+    # Capture origin channel
     origin_channel = body.get("channel_id") or body.get("channel", {}).get("id") or user_id
 
     with flask_app.app_context():
@@ -587,74 +586,104 @@ def open_interval_settings_modal(ack, body, client):
         config = AppConfig.query.filter_by(key="notification_interval").first()
         current_value = config.value if config else "7"
         
-        # Fetch all channels with subscriptions
+        # Fetch all channels
         subscribed_channels = db.session.query(Subscription.channel_id).distinct().all()
-        channel_options = [{"text": {"type": "plain_text", "text": f"<#{ch[0]}>"}, "value": ch[0]} for ch in subscribed_channels]
+        
+        # Note: These show as <#C123> because plain_text doesn't render links.
+        # To show names like "#general", you must fetch the name from Slack API or DB.
+        channel_options = [
+            {"text": {"type": "plain_text", "text": f"<#{ch[0]}>"}, "value": ch[0]} 
+            for ch in subscribed_channels
+        ]
         
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "submit_interval_settings",
-            "private_metadata": origin_channel,  # ✅ Pass channel ID to the modal state
-            "title": {"type": "plain_text", "text": "Notification Interval"},
-            
-            # ✅ REQUIRED: Slack requires this if using 'input' blocks
-            "submit": {"type": "plain_text", "text": "Done"}, 
+            "private_metadata": origin_channel,
+            "title": {"type": "plain_text", "text": "Notification Settings"},
             "close": {"type": "plain_text", "text": "Close"},
             
             "blocks": [
+                # ==========================================
+                # SECTION 1: GROUP SETTINGS
+                # ==========================================
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "🏢 *전체 그룹 기본 설정*"}
+                },
                 {
                     "type": "input",
                     "block_id": "interval_block",
-                    "label": {"type": "plain_text", "text": "그룹 알림간격 (days)"},
+                    "label": {"type": "plain_text", "text": "알림 간격 (Default Days)"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "interval_input",
                         "initial_value": str(current_value),
-                        "placeholder": {"type": "plain_text", "text": "Enter number of days"}
+                        "placeholder": {"type": "plain_text", "text": "7"}
                     }
+                },
+                {
+                    "type": "actions",
+                    "block_id": "group_actions", # Separate block ID
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "💾 그룹 설정 저장"},
+                            "value": "group",
+                            "action_id": "save_group_interval",
+                            "style": "primary" # Green button for primary action
+                        }
+                    ]
+                },
+
+                # ==========================================
+                # DIVIDER
+                # ==========================================
+                {"type": "divider"},
+
+                # ==========================================
+                # SECTION 2: CHANNEL SETTINGS
+                # ==========================================
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📺 *채널별 개별 설정*"}
                 },
                 {
                     "type": "input",
                     "block_id": "channels_block",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "채널 선택 (선택사항)"},
+                    "label": {"type": "plain_text", "text": "대상 채널 선택"},
                     "element": {
                         "type": "multi_static_select",
                         "action_id": "channels_select",
                         "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
-                        "options": channel_options if channel_options else [{"text": {"type": "plain_text", "text": "채널 없음"}, "value": "none"}]
+                        "options": channel_options if channel_options else [{"text": {"type": "plain_text", "text": "구독된 채널 없음"}, "value": "none"}]
                     }
                 },
                 {
                     "type": "input",
                     "block_id": "channel_interval_block",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "채널별 알림간격 (days)"},
+                    "label": {"type": "plain_text", "text": "적용할 알림 간격 (Days)"},
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "channel_interval_input",
                         "initial_value": "7",
-                        "placeholder": {"type": "plain_text", "text": "Enter number of days"}
+                        "placeholder": {"type": "plain_text", "text": "Example: 3"}
                     }
                 },
                 {
                     "type": "actions",
-                    "block_id": "submit_buttons",
+                    "block_id": "channel_actions", # Separate block ID
                     "elements": [
                         {
                             "type": "button",
-                            "text": {"type": "plain_text", "text": "그룹 저장"},
-                            "value": "group",
-                            "action_id": "save_group_interval",
-                            "style": "primary"
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "채널별 저장"},
+                            "text": {"type": "plain_text", "text": "💾 채널 설정 저장"},
                             "value": "channel",
                             "action_id": "save_channel_interval"
+                            # No style (grey) to distinguish from the group save, or use "primary" if preferred
                         }
                     ]
                 }
