@@ -1894,6 +1894,12 @@ def trigger_reminders():
         # Iterate through each user
         for channel_id, items in events_by_user.items():
             if not items: continue
+            if channel_interval_map.get(channel_id):
+                last_notif = channel_interval_map[channel_id].last_interval
+                interval_days = (today - last_notif).days
+                required_interval = channel_interval_map[channel_id].interval
+                if interval_days < required_interval:
+                    continue
             user_slack_id = items[0][1].channel_id
             
             # We will build the blocks list directly now
@@ -2002,7 +2008,7 @@ def trigger_reminders():
             else:
                 # 2. INSERT Case
                 # This is a new channel not in the DB yet. Create and add.
-                cn = ChannelNotification(channel_id=channel_id, last_interval=today)
+                cn = ChannelNotification(channel_id=channel_id, last_interval=today, interval=7)
                 db.session.add(cn)
         
         # 3. COMMIT
