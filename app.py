@@ -109,6 +109,15 @@ class ChannelNotification(db.Model):
     channel_id = db.Column(db.String(50), nullable=False, unique=True)
     last_interval = db.Column(db.DateTime, nullable=True)
 
+class EventReminder(db.Model):
+    """Stores custom reminders scheduled by admins for specific events"""
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+    days_before = db.Column(db.Integer, nullable=False)  # e.g., 3 means "3 days before event"
+    message_template = db.Column(db.String(500), nullable=False)
+    created_by = db.Column(db.String(50), nullable=False) # Admin ID
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
 # Initialize DB and Seed Data
 with flask_app.app_context():
@@ -294,10 +303,9 @@ def get_dashboard_view(user_id):
             "elements": [
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Event"}, "action_id": "open_add_event_modal", "style": "primary"},
                 {"type": "button", "text": {"type": "plain_text", "text": "+ Category"}, "action_id": "open_add_type_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Subscribe Channel"}, "action_id": "open_admin_sub_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Register Channel"}, "action_id": "open_admin_register_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Manage Admins"}, "action_id": "open_manage_admins_modal"},
-                {"type": "button", "text": {"type": "plain_text", "text": "Notification Settings"}, "action_id": "open_interval_settings_modal"}
+                {"type": "button", "text": {"type": "plain_text", "text": "채널구독 관리"}, "action_id": "open_admin_control_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "어드민 추가"}, "action_id": "open_manage_admins_modal"},
+                {"type": "button", "text": {"type": "plain_text", "text": "알림 설정"}, "action_id": "open_interval_settings_modal"}
             ]
         })
         blocks.append({"type": "divider"})
@@ -341,7 +349,7 @@ def get_dashboard_view(user_id):
 def get_category_view(user_id, category, page=0):
     """Detailed view of a single category with pagination."""
     is_admin = is_user_admin(user_id)
-    ITEMS_PER_PAGE = 20
+    ITEMS_PER_PAGE = 18
     events, subs = get_sorted_events('', category=category)
     
     total_pages = math.ceil(len(events) / ITEMS_PER_PAGE)
@@ -424,6 +432,221 @@ def open_edit_event_modal(client, trigger_id, event_id):
 # 5. Bolt Handlers (Interactivity)
 # -------------------------
 
+# ---------------------------------------------------------
+# NEW: Manage / Unsubscribe Tool
+# ---------------------------------------------------------
+
+@bolt_app.command("/admin-manage")
+def open_admin_manage_modal(ack, body, client, command):
+    ack()
+    user_id = command["user_id"]
+    open_manage_modal_logic(client, body["trigger_id"], user_id)
+
+@bolt_app.action("open_admin_manage_modal")
+def open_admin_manage_modal_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    open_manage_modal_logic(client, body["trigger_id"], user_id)
+
+def open_manage_modal_logic(client, trigger_id, user_id):
+    """Shared logic to open the management modal"""
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+
+    client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_manage",
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "구독 관리/삭제"},
+            "submit": {"type": "plain_text", "text": "실행"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "선택한 채널들의 구독 상태를 변경하거나 삭제합니다."}
+                },
+                # 1. Select Action (Delete vs Demote)
+                {
+                    "type": "input",
+                    "block_id": "action_type",
+                    "label": {"type": "plain_text", "text": "작업 유형"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "action_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "🗑️ 구독 취소 (완전 삭제)"}, "value": "delete"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "🗑️ 구독 취소 (완전 삭제)"}, "value": "delete"},
+                            {"text": {"type": "plain_text", "text": "📉 등록 취소 (Pending으로 강등)"}, "value": "demote"}
+                        ]
+                    }
+                },
+                # 2. Select Channels
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "대상 채널 선택"},
+                    "element": {
+                        "type": "multi_conversations_select", 
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "채널 검색"},
+                        "filter": {
+                            "include": ["public", "private"], 
+                            "exclude_bot_users": True 
+                        }
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                # 3. Select Scope (Item, Category, All)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "적용 범위"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
+                },
+                # 4. Specific Event Selector
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_id",
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
+                    }
+                },
+                # 5. Category Selector
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
+@bolt_app.view("submit_admin_manage")
+def handle_admin_manage_submission(ack, body, view, client):
+    ack()
+    
+    values = view["state"]["values"]
+    
+    # Get Data
+    target_channels = values["target_user"]["conversations_select"]["selected_conversations"]
+    action_type = values["action_type"]["action_select"]["selected_option"]["value"]
+    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
+    admin_id = body["user"]["id"]
+    
+    if not target_channels:
+        return
+
+    success_count = 0
+    total_targets = len(target_channels)
+    affected_channels = []
+
+    with flask_app.app_context():
+        # A. Determine Target Events
+        target_events = []
+        mode_label = ""
+
+        if mode == "item":
+            selected_option = values["event_select"]["event_id"]["selected_option"]
+            if not selected_option:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                return
+            event = Event.query.get(int(selected_option["value"]))
+            target_events = [event]
+            mode_label = f"이벤트 *{event.title}*"
+
+        elif mode == "cat":
+            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+            if not selected_cat:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                return
+            cat_name = selected_cat["value"]
+            # Fetch ALL events in category (even past ones, if we want to clean up)
+            target_events = Event.query.filter_by(event_type=cat_name).all()
+            mode_label = f"카테고리 *{cat_name}*"
+
+        elif mode == "all":
+            target_events = Event.query.all()
+            mode_label = "*모든 이벤트*"
+
+        # B. Execute Action
+        for channel in target_channels:
+            channel_hit = False
+            
+            for event in target_events:
+                sub = Subscription.query.filter_by(channel_id=channel, event_id=event.id).first()
+                
+                if sub:
+                    if action_type == "delete":
+                        db.session.delete(sub)
+                        channel_hit = True
+                    elif action_type == "demote":
+                        if sub.status == "Registered":
+                            sub.status = "Pending"
+                            channel_hit = True
+            
+            if channel_hit:
+                success_count += 1
+                affected_channels.append(f"<#{channel}>")
+                
+                # Notify User (Optional - remove if you want silent deletion)
+                try:
+                    action_msg = "구독이 취소되었습니다." if action_type == "delete" else "상태가 '미등록(Pending)'으로 변경되었습니다."
+                    client.chat_postMessage(
+                        channel=channel, 
+                        text=f"ℹ️ 관리자가 귀하의 {mode_label} {action_msg}"
+                    )
+                except Exception:
+                    pass
+
+        # C. Consultant Report
+        if affected_channels:
+            config = AppConfig.query.get("consultant_channel")
+            if config:
+                action_str = "구독 취소" if action_type == "delete" else "등록 취소(Pending)"
+                channel_list_str = ", ".join(affected_channels)
+                
+                msg = f"{channel_list_str} 님의 {mode_label} {action_str} 처리가 완료되었습니다."
+                try:
+                    client.chat_postMessage(channel=config.value, text=msg)
+                except Exception:
+                    pass
+
+        db.session.commit()
+
+    # Final Report to Admin
+    action_word = "삭제" if action_type == "delete" else "변경"
+    client.chat_postEphemeral(
+        channel=admin_id, 
+        user=admin_id, 
+        text=f"✅ 작업 완료: {success_count}개 채널에 대해 {mode_label} {action_word} 처리를 완료했습니다."
+    )
+
+
 @bolt_app.command("/list-events")
 def handle_list_events(ack, respond):
     ack()
@@ -448,9 +671,6 @@ def handle_list_subs(ack, respond, command):
     
     # Check permission
     with flask_app.app_context():
-        if not is_user_admin(user_id):
-            respond("🚫 관리자만 볼 수 있습니다.")
-            return
         
         # Use JOIN to fetch subscriptions and events in one query
         subs = db.session.query(Subscription, Event).join(Event).filter(Subscription.channel_id == target_id).all()
@@ -498,6 +718,8 @@ def handle_list_channels(ack, respond, command):
             msg += f"• {status_emoji} {status_text} <#{sub.channel_id}>\n"
 
         respond(msg)
+
+
 
 #sends messages to all students subscribed to an event
 @bolt_app.command("/send-event-message")
@@ -570,12 +792,393 @@ def open_send_message_modal(ack, body, client):
         }
     )
 
+@bolt_app.command("/check-settings")
+def handle_check_settings(ack, body, client, respond): # <--- 1. Add 'respond' here
+    ack()
+    user_id = body["user_id"]
+    
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            # You can also switch this to respond() for consistency
+            respond(text="🚫 관리자 권한이 없습니다.") 
+            return
+
+        # Get 'Today' for filtering
+        today = datetime.now().date()
+
+        # ---------------------------------------------------------
+        # 1. Fetch Morning Briefing Settings (Global)
+        # ---------------------------------------------------------
+        global_interval = AppConfig.query.get("notification_interval")
+        last_triggered = AppConfig.query.get("notification_last_triggered")
+        
+        g_val = global_interval.value if global_interval else "1 (Default)"
+        l_val = last_triggered.value if last_triggered else "Never"
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "⚙️ 현재 알림 설정 상태 (Active Only)"}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "🌅 *모닝 브리핑 (Global)*"}},
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Trigger Interval:*\n{g_val}일 마다"},
+                    {"type": "mrkdwn", "text": f"*Last Triggered:*\n{l_val}"}
+                ]
+            },
+            {"type": "divider"}
+        ]
+
+        # ---------------------------------------------------------
+        # 2. Fetch Channel-Specific Intervals (Active Only)
+        # ---------------------------------------------------------
+        active_channels = db.session.query(Subscription.channel_id)\
+            .join(Event, Subscription.event_id == Event.id)\
+            .filter(Event.event_date >= today)\
+            .distinct().all()
+        
+        custom_settings = ChannelNotification.query.all()
+        custom_map = {c.channel_id: c for c in custom_settings}
+        
+        channel_text = ""
+        if not active_channels:
+            channel_text = "ℹ️ 활성화된(미래 일정이 있는) 채널이 없습니다."
+        else:
+            for ch_row in active_channels:
+                cid = ch_row[0]
+                setting = custom_map.get(cid)
+                
+                interval_disp = f"{setting.interval} days" if setting else "7 days (Default)"
+                last_run_disp = setting.last_interval.strftime('%Y-%m-%d') if (setting and setting.last_interval) else "Never"
+                
+                channel_text += f"• <#{cid}>: *{interval_disp}* (Last: {last_run_disp})\n"
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "📺 *채널별 알림 간격 (Upcoming Events Only)*"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": channel_text}})
+        blocks.append({"type": "divider"})
+
+        # ---------------------------------------------------------
+        # 3. Fetch Saved Event Reminders (Not Yet Sent)
+        # ---------------------------------------------------------
+        reminders = db.session.query(EventReminder, Event)\
+            .join(Event, EventReminder.event_id == Event.id)\
+            .order_by(Event.event_date).all()
+        
+        active_reminders = []
+        for r, e in reminders:
+            trigger_date = e.event_date - timedelta(days=r.days_before)
+            if trigger_date >= today:
+                active_reminders.append((r, e, trigger_date))
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "⏰ *예약된 리마인더 (대기중)*"}})
+
+        if not active_reminders:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "대기 중인 리마인더가 없습니다."}]})
+        else:
+            for r, e, t_date in active_reminders:
+                msg_preview = (r.message_template[:40] + '..') if len(r.message_template) > 40 else r.message_template
+                
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn", 
+                        "text": f"*{e.title}* (D-{r.days_before})\n📅 발송예정: {t_date}\n📝 {msg_preview}"
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "삭제", "emoji": True},
+                        "style": "danger",
+                        "value": str(r.id),
+                        "action_id": "delete_event_reminder"
+                    }
+                })
+
+        # ---------------------------------------------------------
+        # FINAL FIX: Use 'respond' instead of client.chat_postMessage
+        # ---------------------------------------------------------
+        respond(blocks=blocks) 
+        # Note: By default, this is ephemeral (visible only to you). 
+        # If you want everyone in the channel to see it, use: respond(blocks=blocks, response_type='in_channel')
+
+@bolt_app.action("delete_event_reminder")
+def handle_delete_event_reminder(ack, body, client, respond):
+    ack()
+    
+    # 1. Get the Reminder ID from the button value
+    reminder_id = int(body["actions"][0]["value"])
+    user_id = body["user"]["id"]
+    
+    with flask_app.app_context():
+        # 2. Find and Delete
+        reminder = EventReminder.query.get(reminder_id)
+        
+        if reminder:
+            # Save info for the confirmation message before deleting
+            event_title = Event.query.get(reminder.event_id).title
+            days = reminder.days_before
+            
+            db.session.delete(reminder)
+            db.session.commit()
+            
+            # 3. Post a confirmation (Ephemeral)
+            client.chat_postEphemeral(
+                channel=body["channel"]["id"],
+                user=user_id,
+                text=f"🗑️ *{event_title}* (D-{days}) 리마인더가 삭제되었습니다."
+            )
+            
+            # Optional: You could also try to refresh the original message using respond(replace_original=True, ...) 
+            # but usually just letting them know it's deleted is enough.
+        else:
+            client.chat_postEphemeral(
+                channel=body["channel"]["id"],
+                user=user_id,
+                text="⚠️ 이미 삭제된 리마인더입니다."
+            )
+
+# ---------------------------------------------------------
+# UNIFIED MANAGEMENT TOOL
+# ---------------------------------------------------------
+
+@bolt_app.command("/admin-control")
+def open_admin_control_modal(ack, body, client, command):
+    ack()
+    user_id = command["user_id"]
+    open_control_modal_logic(client, body["trigger_id"], user_id)
+
+@bolt_app.action("open_admin_control_modal")
+def open_admin_control_modal_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    open_control_modal_logic(client, body["trigger_id"], user_id)
+
+def open_control_modal_logic(client, trigger_id, user_id):
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+
+    client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": "submit_admin_control",
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "채널 통합 관리"},
+            "submit": {"type": "plain_text", "text": "실행"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "선택한 채널들에 대해 일괄 작업을 수행합니다."}
+                },
+                # 1. THE MASTER ACTION SWITCH
+                {
+                    "type": "input",
+                    "block_id": "action_type",
+                    "label": {"type": "plain_text", "text": "수행할 작업"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "action_select",
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "⏳ 구독 - 특정 채널에 이벤트 알람 추가"}, "value": "subscribe"},
+                            {"text": {"type": "plain_text", "text": "✅ 등록 - '등록 완료'로 변경/추가"}, "value": "register"},
+                            {"text": {"type": "plain_text", "text": "📉 등록 취소 - 채널의 이벤트를 '대기중'으로 강등"}, "value": "demote"},
+                            {"text": {"type": "plain_text", "text": "🗑️ 구독 삭제 - 채널의 이벤트 구독 취소"}, "value": "delete"}
+                        ]
+                    }
+                },
+                # 2. Select Channels
+                {
+                    "type": "input",
+                    "block_id": "target_user",
+                    "label": {"type": "plain_text", "text": "대상 채널 선택"},
+                    "element": {
+                        "type": "multi_conversations_select", 
+                        "action_id": "conversations_select",
+                        "placeholder": {"type": "plain_text", "text": "채널 검색"},
+                        "filter": {
+                            "include": ["public", "private"], 
+                            "exclude_bot_users": True 
+                        }
+                    }
+                },
+                {"type": "divider"},
+                # 3. Scope Selectors (Item/Cat/All)
+                {
+                    "type": "input",
+                    "block_id": "sub_type",
+                    "label": {"type": "plain_text", "text": "적용 범위"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "1개 이벤트"}, "value": "item"},
+                            {"text": {"type": "plain_text", "text": "카테고리"}, "value": "cat"},
+                            {"text": {"type": "plain_text", "text": "모든 이벤트"}, "value": "all"}
+                        ]
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "event_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_id",
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "cat_select",
+                    "optional": True,
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "cat_name",
+                        "options": get_category_options() 
+                    }
+                }
+            ]
+        }
+    )
+
+@bolt_app.view("submit_admin_control")
+def handle_admin_control_submission(ack, body, view, client):
+    ack()
+    
+    values = view["state"]["values"]
+    admin_id = body["user"]["id"]
+    
+    # 1. Parse Inputs
+    input_block = values["target_user"]["conversations_select"]
+    target_channels = input_block.get("selected_conversations") or input_block.get("selected_channels")
+    if not target_channels: return
+
+    action = values["action_type"]["action_select"]["selected_option"]["value"]
+    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
+    
+    success_count = 0
+    success_list = [] # For Consultant Report
+
+    with flask_app.app_context():
+        # A. Determine Target Events
+        target_events = []
+        mode_label = ""
+
+        if mode == "item":
+            selected_option = values["event_select"]["event_id"]["selected_option"]
+            if not selected_option:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                return
+            event = Event.query.get(int(selected_option["value"]))
+            target_events = [event]
+            mode_label = f"*{event.title}*"
+        elif mode == "cat":
+            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+            if not selected_cat: return
+            cat_name = selected_cat["value"]
+            target_events = Event.query.filter_by(event_type=cat_name).all() # Fetch all (even past) for management
+            mode_label = f"*{cat_name}* 카테고리"
+        elif mode == "all":
+            target_events = Event.query.all()
+            mode_label = "*모든 이벤트*"
+
+        # B. Execute Logic Loop
+        for channel in target_channels:
+            channel_hit = False
+            
+            for event in target_events:
+                sub = Subscription.query.filter_by(channel_id=channel, event_id=event.id).first()
+                
+                # --- LOGIC BRANCHING ---
+                if action == "register":
+                    # Create or Update to Registered
+                    if not sub:
+                        db.session.add(Subscription(channel_id=channel, event_id=event.id, status='Registered'))
+                        channel_hit = True
+                    elif sub.status != 'Registered':
+                        sub.status = 'Registered'
+                        channel_hit = True
+                        
+                elif action == "subscribe":
+                    # Create only if missing (Pending)
+                    if not sub:
+                        db.session.add(Subscription(channel_id=channel, event_id=event.id, status='Pending'))
+                        channel_hit = True
+                        
+                elif action == "demote":
+                    # Update Registered -> Pending
+                    if sub and sub.status == 'Registered':
+                        sub.status = 'Pending'
+                        channel_hit = True
+                        
+                elif action == "delete":
+                    # Delete if exists
+                    if sub:
+                        db.session.delete(sub)
+                        channel_hit = True
+
+            # C. Notify Channel (Only if something changed)
+            if channel_hit:
+                success_count += 1
+                success_list.append(f"<#{channel}>")
+                
+                # Define messages for each action
+                msgs = {
+                    "register": f"✅ 관리자가 이 채널의 {mode_label}\u200B에 등록 완료했습니다. ",
+                    "subscribe": f"⏳ 관리자가 이 채널의 {mode_label}\u200B의 알림 목록에 추가했습니다.",
+                    "demote": f"📉 관리자가 이 채널의 {mode_label}\u200B에 등록을 취소했습니다..",
+                    "delete": f"🗑️ 관리자가 이 채널의 {mode_label}\u200B에 구독을 취소했습니다."
+                }
+
+                try:
+                    client.chat_postMessage(channel=channel, text=msgs[action])
+                except Exception:
+                    pass
+        
+        # D. Consultant Report
+        if success_list:
+            config = AppConfig.query.get("consultant_channel")
+            if config:
+                verb_map = {
+                    "register": "등록 완료",
+                    "subscribe": "구독 추가",
+                    "demote": "등록 취소",
+                    "delete": "구독 삭제"
+                }
+
+                emoji_map = {
+                    "register": "✅",
+                    "subscribe": "⏳",
+                    "demote": "📉",
+                    "delete": "🗑️"
+                }
+                
+                channel_str = ", ".join(success_list)
+                consultant_msg = f"{emoji_map[action]} {channel_str} 채널이 {mode_label}에 *{verb_map[action]}* 처리되었습니다."
+                
+                try:
+                    client.chat_postMessage(channel=config.value, text=consultant_msg)
+                except Exception:
+                    pass
+
+        db.session.commit()
+    
+    # E. Final Report to Admin
+    client.chat_postEphemeral(
+        channel=admin_id, 
+        user=admin_id, 
+        text=f"✅ 작업 완료: 총 {len(target_channels)}개 중 {success_count}개 채널에 {action} 작업을 수행했습니다."
+    )
+
 @bolt_app.action("open_interval_settings_modal")
 def open_interval_settings_modal(ack, body, client):
     ack()
     user_id = body["user"]["id"]
-    
-    # Capture origin channel
     origin_channel = body.get("channel_id") or body.get("channel", {}).get("id") or user_id
 
     with flask_app.app_context():
@@ -587,11 +1190,8 @@ def open_interval_settings_modal(ack, body, client):
         config = AppConfig.query.filter_by(key="notification_interval").first()
         current_value = config.value if config else "7"
         
-        # Fetch all channels
+        # Fetch channels for dropdown
         subscribed_channels = db.session.query(Subscription.channel_id).distinct().all()
-        
-        # Note: These show as <#C123> because plain_text doesn't render links.
-        # To show names like "#general", you must fetch the name from Slack API or DB.
         channel_options = [
             {"text": {"type": "plain_text", "text": f"<#{ch[0]}>"}, "value": ch[0]} 
             for ch in subscribed_channels
@@ -601,56 +1201,29 @@ def open_interval_settings_modal(ack, body, client):
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
-            "callback_id": "submit_nothing", # No submission handling needed
+            "callback_id": "submit_nothing",
             "private_metadata": origin_channel,
             "title": {"type": "plain_text", "text": "Notification Settings"},
             "submit": {"type": "plain_text", "text": "Close"},
             
             "blocks": [
-                # ==========================================
-                # SECTION 1: GROUP SETTINGS
-                # ==========================================
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "🏢 *전체 그룹 기본 설정*"}
-                },
+                # --- GROUP SETTINGS ---
+                {"type": "section", "text": {"type": "mrkdwn", "text": "🏢 *모닝 브리핑 간격설정*"}},
                 {
                     "type": "input",
                     "block_id": "interval_block",
                     "label": {"type": "plain_text", "text": "알림 간격 (Default Days)"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "interval_input",
-                        "initial_value": str(current_value),
-                        "placeholder": {"type": "plain_text", "text": "7"}
-                    }
+                    "element": {"type": "plain_text_input", "action_id": "interval_input", "initial_value": str(current_value)}
                 },
                 {
                     "type": "actions",
-                    "block_id": "group_actions", # Separate block ID
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "💾 그룹 설정 저장"},
-                            "value": "group",
-                            "action_id": "save_group_interval",
-                            "style": "primary" # Green button for primary action
-                        }
-                    ]
+                    "block_id": "group_actions",
+                    "elements": [{"type": "button", "text": {"type": "plain_text", "text": "💾 모닝브리핑 설정 저장"}, "value": "group", "action_id": "save_group_interval", "style": "primary"}]
                 },
-
-                # ==========================================
-                # DIVIDER
-                # ==========================================
                 {"type": "divider"},
 
-                # ==========================================
-                # SECTION 2: CHANNEL SETTINGS
-                # ==========================================
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "📺 *채널별 개별 설정*"}
-                },
+                # --- CHANNEL SETTINGS ---
+                {"type": "section", "text": {"type": "mrkdwn", "text": "📺 *채널별 개별 설정*"}},
                 {
                     "type": "input",
                     "block_id": "channels_block",
@@ -660,7 +1233,7 @@ def open_interval_settings_modal(ack, body, client):
                         "type": "multi_static_select",
                         "action_id": "channels_select",
                         "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
-                        "options": channel_options if channel_options else [{"text": {"type": "plain_text", "text": "구독된 채널 없음"}, "value": "none"}]
+                        "options": channel_options if channel_options else [{"text": {"type": "plain_text", "text": "No Channels"}, "value": "none"}]
                     }
                 },
                 {
@@ -668,28 +1241,112 @@ def open_interval_settings_modal(ack, body, client):
                     "block_id": "channel_interval_block",
                     "optional": True,
                     "label": {"type": "plain_text", "text": "적용할 알림 간격 (Days)"},
+                    "element": {"type": "plain_text_input", "action_id": "channel_interval_input", "initial_value": "7"}
+                },
+                {
+                    "type": "actions",
+                    "block_id": "channel_actions",
+                    "elements": [{"type": "button", "text": {"type": "plain_text", "text": "💾 채널 설정 저장"}, "value": "channel", "action_id": "save_channel_interval"}]
+                },
+                {"type": "divider"},
+
+                # --- NEW: EVENT REMINDER SETTINGS ---
+                {"type": "section", "text": {"type": "mrkdwn", "text": "⏰ *이벤트별 리마인더 예약*"}},
+                {
+                    "type": "input",
+                    "block_id": "event_reminder_select", # RENAMED
+                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "element": {
+                        "type": "external_select",
+                        "action_id": "event_id",
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "event_reminder_days", # RENAMED
+                    "label": {"type": "plain_text", "text": "D-Day 설정 (몇 일 전?)"},
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "channel_interval_input",
-                        "initial_value": "7",
-                        "placeholder": {"type": "plain_text", "text": "Example: 3"}
+                        "action_id": "days_input",
+                        "placeholder": {"type": "plain_text", "text": "ex: 3 (3일 전 발송)"}
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "event_reminder_msg", # RENAMED
+                    "label": {"type": "plain_text", "text": "발송할 메시지"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "msg_text",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "ex: 잊지말고 준비하세요!"}
                     }
                 },
                 {
                     "type": "actions",
-                    "block_id": "channel_actions", # Separate block ID
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "💾 채널 설정 저장"},
-                            "value": "channel",
-                            "action_id": "save_channel_interval"
-                            # No style (grey) to distinguish from the group save, or use "primary" if preferred
-                        }
-                    ]
-                }
+                    "block_id": "event_reminder_actions", # RENAMED
+                    "elements": [{"type": "button", "text": {"type": "plain_text", "text": "💾 리마인더 예약 저장"}, "value": "reminder", "action_id": "save_event_reminder"}]
+                },
             ]
         }
+    )
+
+@bolt_app.action("save_event_reminder")
+def handle_save_event_reminder(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    view = body["view"]
+    values = view["state"]["values"]
+    
+    # 1. Extract Values using the NEW Block IDs
+    selected_option = values["event_reminder_select"]["event_id"]["selected_option"]
+    days_val = values["event_reminder_days"]["days_input"]["value"]
+    msg_val = values["event_reminder_msg"]["msg_text"]["value"]
+    
+    # 2. Validation
+    errors = []
+    if not selected_option:
+        errors.append("이벤트를 선택해주세요.")
+    if not days_val or not days_val.isdigit():
+        errors.append("날짜(D-Day)는 숫자여야 합니다.")
+    if not msg_val:
+        errors.append("메시지를 입력해주세요.")
+        
+    if errors:
+        client.chat_postEphemeral(channel=user_id, user=user_id, text=f"⚠️ 저장 실패: {', '.join(errors)}")
+        return
+
+    # 3. Save to DB
+    event_id = int(selected_option["value"])
+    days_int = int(days_val)
+    
+    with flask_app.app_context():
+        # Check if identical reminder exists to prevent duplicates (optional)
+        exists = EventReminder.query.filter_by(event_id=event_id, days_before=days_int).first()
+        if exists:
+            exists.message_template = msg_val # Update message if exists
+            action_text = "업데이트"
+        else:
+            new_reminder = EventReminder(
+                event_id=event_id,
+                days_before=days_int,
+                message_template=msg_val,
+                created_by=user_id
+            )
+            db.session.add(new_reminder)
+            action_text = "저장"
+        
+        db.session.commit()
+        
+        # Fetch event title for confirmation
+        event_title = Event.query.get(event_id).title
+        
+    client.chat_postEphemeral(
+        channel=user_id, 
+        user=user_id, 
+        text=f"✅ *{event_title}* {days_int}일 전 알림이 {action_text}되었습니다."
     )
 
 @bolt_app.action("save_group_interval")
@@ -871,16 +1528,65 @@ def handle_track_command(ack, respond, command):
 
         # --- ACTION: LIST ---
         elif action == "list":
-            tracked = TrackedStudent.query.filter_by(consultant_id=admin_id).all()
-            if not tracked:
+            # 1. Fetch everything in a single query using outer joins
+            # This joins TrackedStudent -> Subscription -> Event
+            results = db.session.query(
+                TrackedStudent.channel_id, Subscription, Event
+            ).outerjoin(
+                Subscription, TrackedStudent.channel_id == Subscription.channel_id
+            ).outerjoin(
+                Event # Assumes Subscription has a relationship to Event defined. If not, use: Event, Subscription.event_id == Event.id
+            ).filter(
+                TrackedStudent.consultant_id == admin_id
+            ).order_by(
+                TrackedStudent.channel_id, 
+                Event.event_date
+            ).all()
+
+            if not results:
                 respond("📭 현재 추적 중인 학생이 없습니다.")
                 return
-            
-            msg = "*📋 내 담당 학생 리스트:*\n"
-            for t in tracked:
-                # FIX: Ensure this matches your DB column (channel_id)
-                msg += f"• <#{t.channel_id}>\n" 
-            respond(msg)
+
+            # 2. Group the flat results by channel_id
+            students_data = {}
+            for channel_id, sub, event in results:
+                if channel_id not in students_data:
+                    students_data[channel_id] = []
+                # Only append if a subscription actually exists (handles the outer join nulls)
+                if sub and event:
+                    students_data[channel_id].append((sub, event))
+
+            # 3. Build the Slack message
+            msg = "*📋 내 담당 학생 리스트 상세 보고서:*\n\n"
+            today = datetime.now().date()
+
+            for target_id, subs in students_data.items():
+                msg += f"👤 *<#{target_id}>*\n"
+                
+                if not subs:
+                    msg += "  📂 현재 구독 중인 이벤트가 없습니다.\n\n"
+                    continue
+                
+                upcoming_txt = ""
+                history_txt = ""
+                
+                for sub, event in subs:
+                    status_icon = "✅" if sub.status == "Registered" else "⏳"
+                    status_text = "등록 완료" if sub.status == "Registered" else "미등록 (Pending)"
+                    line = f"  • {status_icon} *{event.title}* | 📅 {event.event_date} | *{status_text}*\n"
+                    
+                    if event.event_date >= today:
+                        if sub.status == "Pending" and event.registration_deadline <= (today + timedelta(days=3)):
+                            line += f"      🚨 *경고: 마감 임박 ({event.registration_deadline})*\n"
+                        upcoming_txt += line
+                    else:
+                        history_txt += line
+
+                if upcoming_txt: msg += "  *📅 예정된 일정:*\n" + upcoming_txt
+                if history_txt: msg += "  *📜 지난 일정:*\n" + history_txt
+                msg += "\n" # Spacing between students
+                
+            respond(msg.strip())
 
         # --- ACTION: VIEW DETAILS ---
         # Triggered by '/track #channel' OR '/track show #channel'
@@ -926,46 +1632,45 @@ def handle_track_command(ack, respond, command):
 def open_admin_sub_modal(ack, body, client, command):
     ack()
     user_id = command["user_id"]
-    channel_id = body['channel_id']
-    # 1. Fetch upcoming events for the dropdown
+
+    # Check Admin
     with flask_app.app_context():
         if not is_user_admin(user_id):
             client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
             return
 
-    # 2. Open the Modal
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "submit_admin_sub",
-            "private_metadata": channel_id,
-            "title": {"type": "plain_text", "text": "구독"},
-            "submit": {"type": "plain_text", "text": "유저 구독하기"},
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "채널 구독 (다중)"},
+            "submit": {"type": "plain_text", "text": "구독하기"},
             "blocks": [
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                    "text": {"type": "mrkdwn", "text": "구독시킬 채널들을 선택하세요."}
                 },
-                # Input 1: User Picker
+                # --- MULTI CHANNEL SELECT ---
                 {
                     "type": "input",
                     "block_id": "target_user",
-                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "label": {"type": "plain_text", "text": "채널 선택"},
                     "element": {
-                        "type": "conversations_select",
+                        "type": "multi_conversations_select", 
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널 검색 (비공개 포함)"},
                         "filter": {
-                            "include": [
-                                "public",
-                                "private"
-                            ],
-                            "exclude_bot_users": True
+                            # 1. Only show Public and Private channels
+                            "include": ["public", "private"], 
+                            # 2. explicit safety to hide bots (though 'im' exclusion does this mostly)
+                            "exclude_bot_users": True 
                         }
                     }
                 },
-                # Input 2: Action Type (Single Event or Category?)
+                
+                # ----------------------------
                 {
                     "type": "input",
                     "block_id": "sub_type",
@@ -981,8 +1686,6 @@ def open_admin_sub_modal(ack, body, client, command):
                         ]
                     }
                 },
-                # Input 3: Event Picker (Searchable Dropdown)
-                # Note: This is optional because "All" doesn't need it.
                 {
                     "type": "input",
                     "block_id": "event_select",
@@ -995,12 +1698,11 @@ def open_admin_sub_modal(ack, body, client, command):
                         "min_query_length": 1
                     }
                 },
-                # Input 4: Category Picker (Only needed if Mode is Category)
                 {
                     "type": "input",
                     "block_id": "cat_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
                     "element": {
                         "type": "static_select",
                         "action_id": "cat_name",
@@ -1015,43 +1717,41 @@ def open_admin_sub_modal(ack, body, client, command):
 def open_admin_register_modal(ack, body, client, command):
     ack()
     user_id = command["user_id"]
-    channel_id = body['channel_id']
-    # 1. Fetch upcoming events for the dropdown
+    
     with flask_app.app_context():
         if not is_user_admin(user_id):
             client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
             return
 
-    # 2. Open the Modal
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "submit_admin_register",
-            "private_metadata": channel_id,
-            "title": {"type": "plain_text", "text": "등록"},
-            "submit": {"type": "plain_text", "text": "유저 등록하기"},
+            "private_metadata": user_id,
+            "title": {"type": "plain_text", "text": "채널 등록 (다중)"},
+            "submit": {"type": "plain_text", "text": "등록하기"},
             "blocks": [
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                    "text": {"type": "mrkdwn", "text": "등록 완료 처리할 채널을 선택하세요.\n(미구독 채널은 *자동으로 구독 및 등록*됩니다)"}
                 },
-                # Input 1: User Picker
+                # --- MULTI CHANNEL SELECT (No Users) ---
                 {
-                    "type": "section",
+                    "type": "input",
                     "block_id": "target_user",
-                    "text": {"type": "mrkdwn", "text": "*채널/유저 선택*"},
-                    "accessory": {
-                        "type": "conversations_select",
+                    "label": {"type": "plain_text", "text": "채널 선택"},
+                    "element": {
+                        "type": "multi_conversations_select", 
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널 검색 (비공개 포함)"},
                         "filter": {
-                            "include": ["public", "private"],
-                            "exclude_bot_users": True
+                            "include": ["public", "private"], 
+                            "exclude_bot_users": True 
                         }
                     }
                 },
-                # Input 2: Action Type (Single Event or Category?)
+                # ---------------------------------------
                 {
                     "type": "input",
                     "block_id": "sub_type",
@@ -1067,26 +1767,24 @@ def open_admin_register_modal(ack, body, client, command):
                         ]
                     }
                 },
-                # Input 3: Event Picker (Searchable Dropdown)
-                # Note: This is optional because "All" doesn't need it.
+                # --- CHANGED: Use Generic 'event_id' to allow searching ALL events ---
                 {
                     "type": "input",
                     "block_id": "event_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
                     "element": {
                         "type": "external_select",
-                        "action_id": "event_subscribed",
-                        "placeholder": {"type": "plain_text", "text": "이벤트 선택"},
-                        "min_query_length": 0  # <--- Change this to 0 to auto-load on click
+                        "action_id": "event_id", # Using generic search
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
                     }
                 },
-                # Input 4: Category Picker (Only needed if Mode is Category)
                 {
                     "type": "input",
                     "block_id": "cat_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
                     "element": {
                         "type": "static_select",
                         "action_id": "cat_name",
@@ -1096,7 +1794,6 @@ def open_admin_register_modal(ack, body, client, command):
             ]
         }
     )
-
 # Helper for category options
 def get_category_options():
     with flask_app.app_context():
@@ -1221,37 +1918,41 @@ def open_admin_modal(ack, body, client):
 @bolt_app.action("open_admin_register_modal")
 def open_admin_register_modal_(ack, body, client):
     ack()
-    user_id = body['user']['id']
-    # 2. Open the Modal
+    user_id = body["user"]["id"]
+    
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+
+    # Exact duplicate of the modal above
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "submit_admin_register",
             "private_metadata": user_id,
-            "title": {"type": "plain_text", "text": "등록"},
-            "submit": {"type": "plain_text", "text": "유저 등록하기"},
+            "title": {"type": "plain_text", "text": "채널 등록 (다중)"},
+            "submit": {"type": "plain_text", "text": "등록하기"},
             "blocks": [
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                    "text": {"type": "mrkdwn", "text": "등록 완료 처리할 채널을 선택하세요.\n(미구독 채널은 *자동으로 구독 및 등록*됩니다)"}
                 },
-                # Input 1: User Picker
                 {
-                    "type": "section",
+                    "type": "input",
                     "block_id": "target_user",
-                    "text": {"type": "mrkdwn", "text": "*채널/유저 선택*"},
-                    "accessory": {
-                        "type": "conversations_select",
+                    "label": {"type": "plain_text", "text": "채널 선택"},
+                    "element": {
+                        "type": "multi_conversations_select", 
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "채널을 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널 검색 (비공개 포함)"},
                         "filter": {
-                            "include": ["public", "private"],
-                            "exclude_bot_users": True
+                            "include": ["public", "private"], 
+                            "exclude_bot_users": True 
                         }
                     }
                 },
-                # Input 2: Action Type (Single Event or Category?)
                 {
                     "type": "input",
                     "block_id": "sub_type",
@@ -1267,26 +1968,23 @@ def open_admin_register_modal_(ack, body, client):
                         ]
                     }
                 },
-                # Input 3: Event Picker (Searchable Dropdown)
-                # Note: This is optional because "All" doesn't need it.
                 {
                     "type": "input",
                     "block_id": "event_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "이벤트 선택"},
+                    "label": {"type": "plain_text", "text": "이벤트 선택 (이름 검색)"},
                     "element": {
                         "type": "external_select",
-                        "action_id": "event_subscribed",
-                        "placeholder": {"type": "plain_text", "text": "이벤트 선택"},
-                        "min_query_length": 0  # <--- Change this to 0 to auto-load on click
+                        "action_id": "event_id", # Generic search
+                        "placeholder": {"type": "plain_text", "text": "검색어 입력"},
+                        "min_query_length": 1
                     }
                 },
-                # Input 4: Category Picker (Only needed if Mode is Category)
                 {
                     "type": "input",
                     "block_id": "cat_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
                     "element": {
                         "type": "static_select",
                         "action_id": "cat_name",
@@ -1302,39 +2000,43 @@ def open_admin_sub_modal_(ack, body, client):
     ack()
     user_id = body["user"]["id"]
 
-    # 2. Open the Modal
+    # Check Admin
+    with flask_app.app_context():
+        if not is_user_admin(user_id):
+            client.chat_postEphemeral(channel=user_id, user=user_id, text="🚫 관리자 권한이 없습니다.")
+            return
+
     client.views_open(
         trigger_id=body["trigger_id"],
         view={
             "type": "modal",
             "callback_id": "submit_admin_sub",
             "private_metadata": user_id,
-            "title": {"type": "plain_text", "text": "구독"},
-            "submit": {"type": "plain_text", "text": "유저 구독하기"},
+            "title": {"type": "plain_text", "text": "채널 구독 (다중)"},
+            "submit": {"type": "plain_text", "text": "구독하기"},
             "blocks": [
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "유저를 선택하고 이벤트를 지정하세요."}
+                    "text": {"type": "mrkdwn", "text": "구독시킬 채널들을 선택하세요."}
                 },
-                # Input 1: User Picker
+                # --- MULTI CHANNEL SELECT ---
                 {
                     "type": "input",
                     "block_id": "target_user",
-                    "label": {"type": "plain_text", "text": "유저 선택"},
+                    "label": {"type": "plain_text", "text": "채널 선택"},
                     "element": {
-                        "type": "conversations_select",
+                        "type": "multi_conversations_select", 
                         "action_id": "conversations_select",
-                        "placeholder": {"type": "plain_text", "text": "유저를 선택하세요"},
+                        "placeholder": {"type": "plain_text", "text": "채널 검색 (비공개 포함)"},
                         "filter": {
-                            "include": [
-                                "public",
-                                "private"
-                            ],
-                            "exclude_bot_users": True
+                            # 1. Only show Public and Private channels
+                            "include": ["public", "private"], 
+                            # 2. explicit safety to hide bots (though 'im' exclusion does this mostly)
+                            "exclude_bot_users": True 
                         }
                     }
                 },
-                # Input 2: Action Type (Single Event or Category?)
+                # ----------------------------
                 {
                     "type": "input",
                     "block_id": "sub_type",
@@ -1350,8 +2052,6 @@ def open_admin_sub_modal_(ack, body, client):
                         ]
                     }
                 },
-                # Input 3: Event Picker (Searchable Dropdown)
-                # Note: This is optional because "All" doesn't need it.
                 {
                     "type": "input",
                     "block_id": "event_select",
@@ -1364,12 +2064,11 @@ def open_admin_sub_modal_(ack, body, client):
                         "min_query_length": 1
                     }
                 },
-                # Input 4: Category Picker (Only needed if Mode is Category)
                 {
                     "type": "input",
                     "block_id": "cat_select",
                     "optional": True,
-                    "label": {"type": "plain_text", "text": "카테고리 선택 (카테고리 모드를 선택했을경우)"},
+                    "label": {"type": "plain_text", "text": "카테고리 선택"},
                     "element": {
                         "type": "static_select",
                         "action_id": "cat_name",
@@ -1501,82 +2200,100 @@ def submit_nothing(ack, body, view, client):
 def handle_admin_sub_submission(ack, body, view, client):
     ack()
     
-    # 1. Extract Data
     values = view["state"]["values"]
-    target_user = values["target_user"]["conversations_select"]["selected_conversation"]
-    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
     
-    # Context info
-    admin_id = body["user"]["id"]
-    channel_id = view["private_metadata"]
-    msg = ""
-    target_msg = ""
-    to_send_target = False
-
-    with flask_app.app_context():
+    # 1. Get List of Channels
+    target_channels = values["target_user"]["conversations_select"]["selected_conversations"]
+    
+    if not target_channels:
+        return
         
-        # --- MODE 1: SINGLE ITEM ---
+    mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
+    admin_id = body["user"]["id"]
+    
+    # Track stats and names for the report
+    success_count = 0
+    total_targets = len(target_channels)
+    success_list = []  # List to store formatted channel names (e.g. <#C123>)
+    
+    with flask_app.app_context():
+        # A. Prepare Event Data
+        events_to_subscribe = []
+        mode_label = ""
+
         if mode == "item":
             selected_option = values["event_select"]["event_id"]["selected_option"]
-            if not selected_option or selected_option["value"] == "none":
-                # Send error message to Admin
-                client.chat_postMessage(channel=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+            if not selected_option:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
                 return
+            event = Event.query.get(int(selected_option["value"]))
+            events_to_subscribe = [event]
+            mode_label = f"*{event.title}* 이벤트"
 
-            event_id = int(selected_option["value"])
-            event = Event.query.get(event_id)
-            
-            # Subscribe
-            if not Subscription.query.filter_by(channel_id=target_user, event_id=event_id).first():
-                db.session.add(Subscription(channel_id=target_user, event_id=event_id, status='Pending'))
-                msg = f"✅ <#{target_user}> 님이 *{event.title}*에 예정되었습니다."
-                to_send_target = True
-                target_msg = f"✅ <#{target_user}> 님이 *{event.title}*에 예정되었습니다."
-            else:
-                msg = f"ℹ️ <#{target_user}> 님은 이미 해당 이벤트에 예정되어 있습니다."
-
-        # --- MODE 2: CATEGORY ---
         elif mode == "cat":
             selected_cat = values["cat_select"]["cat_name"]["selected_option"]
             if not selected_cat:
-                client.chat_postMessage(channel=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
                 return
-            
             cat_name = selected_cat["value"]
-            cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
-            
-            count = 0
-            for event in cat_events:
-                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
-                    count += 1
-            msg = f"✅ <#{target_user}> 님을 *{cat_name}* 카테고리 전체({count}개)에 예정되었습니다."
-            to_send_target = True
-            event_names = [e.title for e in cat_events]
-            target_msg = f"✅ <#{target_user}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 예정되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
+            events_to_subscribe = Event.query.filter_by(event_type=cat_name)\
+                                       .filter(Event.registration_deadline >= datetime.now().date())\
+                                       .all()
+            mode_label = f"카테고리 *{cat_name}*"
 
-        # --- MODE 3: ALL ---
         elif mode == "all":
-            all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
-            count = 0
-            for event in all_events:
-                if not Subscription.query.filter_by(channel_id=target_user, event_id=event.id).first():
-                    db.session.add(Subscription(channel_id=target_user, event_id=event.id, status='Pending'))
-                    count += 1
-            msg = f"✅ <#{target_user}> 님을 *모든 이벤트({count}개)*에 예정되었습니다."
-            to_send_target = True
-            event_names = [e.title for e in all_events]
-            target_msg = f"✅ <#{target_user}> 님이 *모든 이벤트*에 예정되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
-        config = AppConfig.query.get("consultant_channel")
-        config_id = config.value if config else None
+            events_to_subscribe = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
+            mode_label = "*모든 이벤트*"
+
+        # B. Loop through Each Selected Channel
+        for target_channel in target_channels:
+            channel_subscribed_count = 0
+            
+            for event in events_to_subscribe:
+                if not Subscription.query.filter_by(channel_id=target_channel, event_id=event.id).first():
+                    db.session.add(Subscription(channel_id=target_channel, event_id=event.id, status='Pending'))
+                    channel_subscribed_count += 1
+            
+            # If at least one new subscription was added
+            if channel_subscribed_count > 0:
+                success_count += 1
+                success_list.append(f"<#{target_channel}>") # Add to summary list
+                
+                # Send DM to the Target Channel
+                try:
+                    msg_text = f"⏳ 관리자가 이 채널을 {mode_label} 알림 목록에 추가했습니다."
+                    if mode == "item":
+                         msg_text = f"⏳ 관리자가 이 채널을 *{events_to_subscribe[0].title}* 알림 목록에 추가했습니다."
+                    
+                    client.chat_postMessage(channel=target_channel, text=msg_text)
+                except Exception as e:
+                    print(f"Failed to notify {target_channel}: {e}")
+
+        # C. Send Summary to Consultant Channel (Updated Format)
+        if success_list:
+            config = AppConfig.query.get("consultant_channel")
+            if config:
+                consultant_channel_id = config.value
+                
+                # Format: "<#C123>, <#C456> 님이 ..."
+                channel_list_str = ", ".join(success_list)
+                
+                # New concise message format
+                consultant_msg = f"⏳ {channel_list_str} 님이 {mode_label}\u200b에 구독되었습니다."
+                
+                try:
+                    client.chat_postMessage(channel=consultant_channel_id, text=consultant_msg)
+                except Exception as e:
+                    print(f"Failed to notify consultant channel: {e}")
+
         db.session.commit()
     
-    # Notify Admin of success
-    client.chat_postEphemeral(channel=channel_id, user=admin_id, text=msg)
-    if to_send_target is True:
-        if config_id:
-            client.chat_postMessage(channel=config_id, text=target_msg)
-        client.chat_postMessage(channel=target_user, text=target_msg)
+    # D. Final Ephemeral Report to Admin
+    client.chat_postEphemeral(
+        channel=admin_id, 
+        user=admin_id, 
+        text=f"⏳ 작업 완료: 총 {total_targets}개 채널 중 {success_count}곳에 {mode_label} 구독을 적용했습니다."
+    )
 
 from datetime import datetime
 
@@ -1584,103 +2301,104 @@ from datetime import datetime
 def handle_admin_register_submission(ack, body, view, client):
     ack()
     
-    # 1. Extraction
     values = view["state"]["values"]
     
-    # target_id is the Channel ID selected in the dropdown
-    target_id = values["target_user"]["conversations_select"]["selected_conversation"]
-    # Make explicit copy to prevent any variable mutation
-    channel_to_notify = str(target_id) if target_id else None
+    # 1. Get List of Channels (from multi_conversations_select)
+    target_channels = values["target_user"]["conversations_select"]["selected_conversations"]
     
+    if not target_channels:
+        return
+        
     mode = values["sub_type"]["mode_select"]["selected_option"]["value"]
-    
-    # admin_id is the person performing the action
     admin_id = body["user"]["id"]
-    # context_channel is where the /admin-register command was originally typed
-    context_channel = view["private_metadata"] 
-    to_send_target = False
-    target_msg = ""
-    try:
-        with flask_app.app_context():
-            msg = ""
+    
+    success_count = 0
+    total_targets = len(target_channels)
+    success_list = [] # For Consultant Report
+    
+    with flask_app.app_context():
+        # A. Prepare Event Data
+        events_to_register = []
+        mode_label = ""
+
+        if mode == "item":
+            # Note: We use "event_id" now (generic search), not "event_subscribed"
+            selected_option = values["event_select"]["event_id"]["selected_option"]
+            if not selected_option:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
+                return
+            event = Event.query.get(int(selected_option["value"]))
+            events_to_register = [event]
+            mode_label = f"*{event.title}*"
+
+        elif mode == "cat":
+            selected_cat = values["cat_select"]["cat_name"]["selected_option"]
+            if not selected_cat:
+                client.chat_postEphemeral(channel=admin_id, user=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
+                return
+            cat_name = selected_cat["value"]
+            events_to_register = Event.query.filter_by(event_type=cat_name)\
+                                       .filter(Event.registration_deadline >= datetime.now().date())\
+                                       .all()
+            mode_label = f"카테고리 *{cat_name}*"
+
+        elif mode == "all":
+            events_to_register = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
+            mode_label = "*모든 이벤트*"
+
+        # B. Loop through Channels
+        for target_channel in target_channels:
+            channel_updated = False
             
-            # --- MODE 1: SINGLE ITEM ---
-            if mode == "item":
-                # Matches your external_select action_id
-                block_data = values.get("event_select", {}).get("event_subscribed", {})
-                selected_option = block_data.get("selected_option")
+            for event in events_to_register:
+                # Find existing subscription
+                sub = Subscription.query.filter_by(channel_id=target_channel, event_id=event.id).first()
                 
-                if not selected_option or selected_option["value"] == "none":
-                    client.chat_postEphemeral(channel=context_channel, user=admin_id, text="⚠️ 이벤트를 선택해야 합니다.")
-                    return
-
-                event_id = int(selected_option["value"])
-                event = Event.query.get(event_id)
-                
-                # Check for existing subscription for this CHANNEL
-                sub = Subscription.query.filter_by(channel_id=target_id, event_id=event_id).first()
                 if sub:
-                    sub.status = 'Registered' # Upgrade Pending to Registered
+                    # If exists, just update status
+                    if sub.status != 'Registered':
+                        sub.status = 'Registered'
+                        channel_updated = True
                 else:
-                    db.session.add(Subscription(channel_id=target_id, event_id=event_id, status='Registered'))
-                
-                db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *{event.title}*에 신청과 등록이 되었습니다.."
-                target_msg = f"✅ <#{target_id}> 님이 *{event.title}*에 신청과 등록이 되었습니다."
-                to_send_target = True
+                    # If NOT exists, Create New (Auto-Subscribe + Register)
+                    db.session.add(Subscription(channel_id=target_channel, event_id=event.id, status='Registered'))
+                    channel_updated = True
+            
+            # Notify Channel
+            if channel_updated:
+                success_count += 1
+                success_list.append(f"<#{target_channel}>")
+                try:
+                    msg_text = f"✅ 관리자가 이 채널을 {mode_label}에 등록 완료시켰습니다."
+                    if mode == "item":
+                         msg_text = f"✅ 관리자가 이 채널을 *{events_to_register[0].title}*에 등록 완료시켰습니다."
+                    client.chat_postMessage(channel=target_channel, text=msg_text)
+                except Exception as e:
+                    print(f"Failed to notify {target_channel}: {e}")
 
-            # --- MODE 2: CATEGORY ---
-            elif mode == "cat":
-                selected_cat = values["cat_select"]["cat_name"]["selected_option"]
-                if not selected_cat:
-                    client.chat_postEphemeral(channel=context_channel, user=admin_id, text="⚠️ 카테고리를 선택해야 합니다.")
-                    return
-                
-                cat_name = selected_cat["value"]
-                cat_events = Event.query.filter_by(event_type=cat_name).filter(Event.registration_deadline >= datetime.now().date()).all()
-                
-                count = 0
-                for event in cat_events:
-                    if not Subscription.query.filter_by(channel_id=target_id, event_id=event.id).first():
-                        db.session.add(Subscription(channel_id=target_id, event_id=event.id, status='Registered'))
-                        count += 1
-                
-                db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *{cat_name}* 카테고리 전체({count}개)에 신청과 등록이 되었습니다."
-                event_names = [e.title for e in cat_events]
-                target_msg = f"✅ <#{target_id}> 님이 *{cat_name}* 카테고리의 다음 이벤트에 신청과 등록이 되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
-                to_send_target = True
-
-            # --- MODE 3: ALL ---
-            elif mode == "all":
-                all_events = Event.query.filter(Event.registration_deadline >= datetime.now().date()).all()
-                count = 0
-                for event in all_events:
-                    if not Subscription.query.filter_by(channel_id=target_id, event_id=event.id).first():
-                        db.session.add(Subscription(channel_id=target_id, event_id=event.id, status='Registered'))
-                        count += 1
-                
-                db.session.commit()
-                msg = f"✅ <#{target_id}> 채널이 *모든 이벤트({count}개)*에 신청과 등록이 되었습니다."
-                event_names = [e.title for e in all_events]
-                target_msg = f"✅ <#{target_id}> 님이 *모든 이벤트*에 신청과 등록이 되었습니다:\n" + "\n".join([f"• {name}" for name in event_names])
-                to_send_target = True
+        # C. Send Summary to Consultant Channel
+        if success_list:
             config = AppConfig.query.get("consultant_channel")
-            config_id = config.value if config else None
-            targ = target_id
+            if config:
+                consultant_channel_id = config.value
+                channel_list_str = ", ".join(success_list)
+                
+                # Format: #Channel1, #Channel2 님이 [Event]에 등록되었습니다.
+                consultant_msg = f"✅ {channel_list_str} 님이 {mode_label}에 등록 완료되었습니다."
+                
+                try:
+                    client.chat_postMessage(channel=consultant_channel_id, text=consultant_msg)
+                except Exception as e:
+                    print(f"Failed to notify consultant channel: {e}")
 
-        # 2. Notify the Admin (Ephemeral in the original channel)
-        client.chat_postEphemeral(channel=context_channel, user=admin_id, text=msg)
-        # 3. Notify the Target Channel (Public message)
-        # Using chat_postMessage ensures the channel sees the update.
-        if to_send_target is True:
-            if config_id:
-                client.chat_postMessage(channel=config_id, text=target_msg)
-            client.chat_postMessage(channel=channel_to_notify, text=target_msg)
+        db.session.commit()
 
-    except Exception as e:
-        print(f"CRITICAL ERROR in submission: {e}")
-        client.chat_postMessage(channel=admin_id, text=f"❌ DB 등록 오류: {str(e)}")
+    # D. Final Ephemeral Report
+    client.chat_postEphemeral(
+        channel=admin_id, 
+        user=admin_id, 
+        text=f"✅ 작업 완료: 총 {total_targets}개 채널 중 {success_count}곳에 {mode_label} 등록을 적용했습니다."
+    )
 
 # --- Interactive Actions ---
 
@@ -2055,6 +2773,50 @@ def trigger_reminders():
                 print("Briefing sent successfully.")
         except Exception as e:
             logger.error(f"Failed to send briefing: {e}")
+
+        custom_reminders = EventReminder.query.all()
+        
+        for reminder in custom_reminders:
+            try:
+                # 1. Calculate the Trigger Date
+                event = Event.query.get(reminder.event_id)
+                if not event: continue
+                
+                trigger_date = event.event_date - timedelta(days=reminder.days_before)
+                
+                # 2. Check if TODAY is the trigger date
+                if today == trigger_date:
+                    
+                    # 3. Find Subscribers (Registered users only? or all? Assuming Registered for now)
+                    # If you want ALL subscribers (pending + registered), remove the status filter.
+                    subs = Subscription.query.filter_by(event_id=event.id).all()
+                    
+                    for sub in subs:
+                        try:
+                            # Build the Message
+                            blocks = [
+                                {
+                                    "type": "header",
+                                    "text": {"type": "plain_text", "text": f"⏰ D-{reminder.days_before} 알림: {event.title}"}
+                                },
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": reminder.message_template}
+                                },
+                                {
+                                    "type": "context",
+                                    "elements": [{"type": "mrkdwn", "text": f"📅 행사일: {event.event_date}"}]
+                                }
+                            ]
+                            bolt_app.client.chat_postMessage(channel=sub.channel_id, text=reminder.message_template, blocks=blocks)
+                            total_sent += 1
+                        except Exception as inner_e:
+                            print(f"Failed custom reminder for {sub.channel_id}: {inner_e}")
+                            
+            except Exception as e:
+                logger.error(f"Error processing reminder ID {reminder.id}: {e}")
+        
+
         tomorrow = today + timedelta(days=1)
         # ====================================================
         # TASK A: Registration Deadline Reminder (Day Before)
@@ -2071,7 +2833,7 @@ def trigger_reminders():
                 msg_text = f"🚨 *마감 임박 알림: {event.title}*"
                 blocks = [
                     {
-                        "type": "section",
+                        "type": "header",
                         "text": {"type": "mrkdwn", "text": f"🚨 *마감 임박! 내일이 등록 마감일입니다.*"}
                     },
                     {
